@@ -1,0 +1,7 @@
+# Runtime dependencies for all three Patrol services (pinned for repeatable builds)
+boto3==1.43.115
+fastapi==0.150.0
+httpx==0.28.1
+prometheus-client==0.26.0
+PyYAML==6.0.3
+uvicorn==0.54.0

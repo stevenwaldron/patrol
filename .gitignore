@@ -1,0 +1,35 @@
+# Terraform: unanchored patterns so EVERY folder is covered, including
+# infra/bootstrap/ (lesson from the chess project's 691 MB push).
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Keep the provider lock file committed
+!.terraform.lock.hcl
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

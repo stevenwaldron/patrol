@@ -1,0 +1,8 @@
+# Only app/ and config/ go into the build context; everything else stays out.
+# A smaller context builds faster and can't leak files (state, secrets) into an image.
+*
+!app/requirements.txt
+!app/patrol/
+!config/sites.yaml
+**/__pycache__/
+**/*.pyc
