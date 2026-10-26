@@ -8,7 +8,7 @@
 # LoadBalancer Service) are unknown to Terraform. If the cluster is destroyed
 # first, they're orphaned: still billing, and blocking the VPC from deleting.
 # So: delete them through Kubernetes, wait until AWS confirms they're gone,
-# then run terraform destroy, then check nothing was left behind.
+# then run terraform destroy, then confirm nothing was left behind.
 set -euo pipefail
 cd "$(dirname "$0")/cluster"
 
@@ -68,16 +68,37 @@ ip=$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]' || echo 203.0.1
 AWS_PROFILE=$PROFILE terraform init -input=false
 AWS_PROFILE=$PROFILE terraform destroy -var "admin_cidrs=[\"${ip}/32\"]"
 
-echo "==> Checking for leftovers"
-left=$(aws resourcegroupstaggingapi get-resources --profile "$PROFILE" --region "$REGION" \
-  --tag-filters Key=Layer,Values=cluster --query 'ResourceTagMappingList[].ResourceARN' --output text)
-if [[ -n "$left" ]]; then
-  echo "Still tagged Layer=cluster (may take a few minutes to clear from the tag index):"
-  echo "$left" | tr '\t' '\n'
+echo "==> Checking for leftovers (asking each service directly)"
+# Not the tagging index: it lags deletions by minutes and reported a deleted NAT
+# gateway and subnets as "left over" on the first real run. These calls are
+# authoritative. They cover everything that could keep billing or block a rebuild.
+leftovers=0
+check() {  # check "description" "output of an AWS query"
+  if [[ -n "$2" && "$2" != "False" && "$2" != "None" ]]; then
+    echo "  LEFTOVER  $1: $2"
+    leftovers=$((leftovers + 1))
+  else
+    echo "  ok        $1"
+  fi
+}
+check "EKS cluster" "$(aws eks list-clusters --profile "$PROFILE" --region "$REGION" \
+  --query "contains(clusters, '$CLUSTER')" --output text)"
+check "Node EC2 instances" "$(aws ec2 describe-instances --profile "$PROFILE" --region "$REGION" \
+  --filters "Name=tag:eks:cluster-name,Values=$CLUSTER" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+  --query 'Reservations[].Instances[].InstanceId' --output text)"
+check "NAT gateways" "$(aws ec2 describe-nat-gateways --profile "$PROFILE" --region "$REGION" \
+  --filter "Name=tag:Project,Values=patrol" "Name=state,Values=pending,available,deleting,failed" \
+  --query 'NatGateways[].NatGatewayId' --output text)"
+check "Elastic IPs" "$(aws ec2 describe-addresses --profile "$PROFILE" --region "$REGION" \
+  --filters "Name=tag:Project,Values=patrol" --query 'Addresses[].PublicIp' --output text)"
+check "VPC" "$(aws ec2 describe-vpcs --profile "$PROFILE" --region "$REGION" \
+  --filters "Name=tag:Project,Values=patrol" "Name=tag:Layer,Values=cluster" --query 'Vpcs[].VpcId' --output text)"
+check "Kubernetes load balancers" "$(k8s_load_balancers)"
+if (( leftovers > 0 )); then
+  echo "==> $leftovers leftover type(s) found. They may still be billing: check the console." >&2
 else
-  echo "Nothing left with Layer=cluster."
+  echo "==> Nothing left over."
 fi
-if [[ -z "$(k8s_load_balancers)" ]]; then echo "No Kubernetes load balancers left."; fi
 
 kubectl config delete-context "$CLUSTER" >/dev/null 2>&1 || true
 elapsed=$(( $(date +%s) - started ))

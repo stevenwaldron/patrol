@@ -25,3 +25,8 @@ output "nat_gateway_ids" {
 output "internet_gateway_id" {
   value = aws_internet_gateway.main.id
 }
+
+output "private_route_table_ids" {
+  description = "One route table per private subnet (used for VPC gateway endpoints)."
+  value       = aws_route_table.private[*].id
+}

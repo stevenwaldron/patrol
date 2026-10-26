@@ -159,3 +159,47 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 - `down.sh` order: delete Argo CD apps (Phase 3+), Ingresses and LoadBalancer Services through Kubernetes → wait until AWS confirms the controller-created load balancers are gone → `terraform destroy` → check for anything still tagged `Layer=cluster`. Load balancers made by Kubernetes are unknown to Terraform; destroying first orphans them (still billing, and they block VPC deletion). Same orphan pattern as the chess migration.
 - **Bug (caught before delivery).** `[[ -n "$ns" ]] && kubectl …` inside a piped loop returns non-zero on an empty line; with `set -e` + `pipefail` that would have aborted `down.sh` mid-cleanup. Fixed with an explicit `if`.
 - Verification: ShellCheck 0.11 clean on every script in the repo. `down.sh` run end to end against stand-in `aws`/`kubectl`/`terraform` commands: correct order, waited through a load balancer that took two polls to disappear; and with a load balancer that never disappears it exited 1 **without running `terraform destroy`**.
+- First `up.sh` plan: **50 to add**, 0 to change, 0 to destroy; Kubernetes version 1.36 confirmed in the outputs.
+- **First cluster build: 50 added in 14m 34s** (apply + kubeconfig + nodes Ready). Two nodes Ready on `v1.36.4-eks`, Amazon Linux 2023, containerd 2.3.5, private IPs `10.20.30.118` and `10.20.32.116`: one in each /20 private subnet, so the copies can spread across both zones.
+- **EKS console:** Active, 1.36, "Standard support until August 1, 2027" (the STANDARD upgrade policy, no silent extended support), 2 nodes, 1 node group, 4 add-ons, 8 pods, 0 health / upgrade / node issues.
+- **Surprise.** The console still shows an "OpenID Connect provider URL" despite `enable_irsa = false`. Every EKS cluster has an OIDC *issuer* (it signs service-account tokens); IRSA additionally needs an IAM *OIDC identity provider* registered in the account pointing at it. `enable_irsa = false` skips only that IAM registration. Worth knowing for interviews: "issuer exists, IAM trust doesn't".
+- **Prefix delegation confirmed:** `pods: 110` (Capacity and Allocatable) on the node, instead of t3.medium's default 17. All 8 system pods `Running`, 0 restarts.
+- **Mistake (mine, in the check command).** `kubectl describe nodes | grep … | head -4` cut off after the first node's two `pods:` lines (Capacity + Allocatable), so it only proved node 1. Better check: `kubectl get nodes -o custom-columns=NODE:.metadata.name,MAX_PODS:.status.allocatable.pods` (one line per node).
+- **Both nodes verified:** `10.20.30.118` → 110 pods, us-east-1a (subnet 10.20.16.0/20); `10.20.32.116` → 110 pods, us-east-1b (subnet 10.20.32.0/20). Node IPs land in the subnet planned for each zone.
+- **First teardown: 50 destroyed in 12m 52s.** Full first cycle (build, verify, destroy) about 27 minutes of cluster time.
+- **Bug (false alarm).** Symptom: `down.sh` reported a NAT gateway and two subnets "still tagged Layer=cluster" after a clean destroy. Investigation (systematic, before changing anything): the subnet IDs were the *public* subnets; AWS can't delete a VPC that still has subnets, so they couldn't exist. Confirmed directly: NAT gateway state `deleted`, both subnets `InvalidSubnetID.NotFound`, no VPC, no Elastic IP, no cluster. Cause: the Resource Groups Tagging API index lags deletions by minutes, and deleted NAT gateways stay visible (state `deleted`) for about an hour. Fix: `down.sh` now asks each service directly (EKS, EC2 instances, NAT gateways excluding `deleted`, Elastic IPs, VPC, controller-made load balancers) and prints an ok/LEFTOVER checklist. Tested both outcomes with stand-in commands; ShellCheck clean.
+- Lesson: an index or cache answering "what exists?" is not the source of truth. For anything that bills, ask the service.
+
+**Phase 2 complete:** cluster built from Terraform in 14m 34s, verified (2 nodes across 2 zones, 110 pods each, 8 healthy system pods, STANDARD support), destroyed in 12m 52s with nothing left over.
+
+---
+
+## Phase 3: Patrol running in the cluster (plan approved)
+
+- Decision: **public GitHub repo `patrol`**, matching the other portfolio projects; Argo CD reads it without stored credentials. Nothing secret is ever committed (account IDs and queue URLs aren't secrets; the Slack webhook lives in Secrets Manager; `.gitignore` blocks state, tfvars, `.terraform/`, `.venv/`). Rejected a private repo (Argo CD would need a stored deploy key, and the code is portfolio material anyway).
+- Decision: **HTTP first, HTTPS as the final step of Phase 3**: delegate only `patrol.cloudforger.app` from IONOS to a Route 53 zone (~$0.50/month), free ACM certificate validated once by DNS (both permanent layer), and **ExternalDNS** to repoint the record at each rebuild's new load balancer. Rejected a hand-made DNS record (breaks on every rebuild, since the load balancer's address changes). Debugging one thing at a time: plain HTTP must work before certificates enter the picture.
+- Decision: **Argo CD installed by `up.sh` with Helm** (pinned chart version), then one root Application ("app of apps") installs everything else. Rejected installing it with Terraform's Helm provider: it blurs "Terraform owns AWS, Argo CD owns the cluster".
+- Decision: **first images pushed from the Mac** by a script, tagged with the Git commit; Phase 4 automates exactly this in GitHub Actions.
+- Decision: **free VPC gateway endpoints for DynamoDB and S3**. Found while learning: with no endpoints, a NAT gateway failure would break checks, the status page's DynamoDB reads, and image pulls (ECR stores layers in S3). Endpoints remove that single point of failure for DynamoDB/S3 and cut NAT data charges.
+- Decision: **IAM roles in the permanent layer, Pod Identity associations in the cluster layer**. Roles don't depend on the cluster (Pod Identity trust is cluster-agnostic), so they survive every teardown; only the associations are rebuilt.
+- Design rule (from the identity lesson): the pod is the security boundary; anything needing different permissions gets its own pod and ServiceAccount.
+
+- **Repo created (pre-commit check).** Safety check before the first commit flagged `infra/bootstrap/terraform.tfvars.example`; verified its staged content was only the placeholder (`you@example.com`) before pushing, rather than assuming either way. Staged files: 54, including the three `.terraform.lock.hcl` files (provider versions pinned in Git) and no real `terraform.tfvars`, state, `.terraform/` or `.venv/`.
+- **Pushed:** first commit `a8577cf` to `github.com/stevenwaldron/patrol` (public), 66 objects, 52.5 KiB.
+
+### Phase 3, step 2: Pod Identity roles, associations, gateway endpoints
+
+- **Permanent layer:** 4 IAM roles + 4 managed policies + 4 attachments (scheduler, worker, status-page, aws-load-balancer-controller).
+- Decision: trust policy per AWS docs (`pods.eks.amazonaws.com`, `sts:AssumeRole` + `sts:TagSession`) **plus conditions pinning `aws:RequestTag/kubernetes-namespace` and `aws:RequestTag/kubernetes-service-account`**. A role can only be used by its one intended ServiceAccount, even if a wrong association were created. Rejected the bare trust policy (any association could use any role).
+- Decision: least privilege from the code's actual calls: scheduler `sqs:SendMessage` (covers SendMessageBatch); worker `sqs:ReceiveMessage` + `sqs:DeleteMessage` + `dynamodb:PutItem`; status page `dynamodb:Query`. Each scoped to the one queue or table ARN.
+- Decision: load balancer controller pinned to **v2.17.1** (latest release tag, checked with `git ls-remote`), using the **official policy file from that exact tag**, stored as `policies/aws-load-balancer-controller-v2.17.1.json`. Upgrading the controller means replacing the file too. Size checked: 5,196 chars against the 6,144 managed-policy limit.
+- Decision: managed policies (`aws_iam_policy`) rather than inline: the controller's policy is large, and managed policies are visible and reusable in the console.
+- **Cluster layer:** `aws_eks_pod_identity_association` for each role, read from the permanent layer's state (`terraform_remote_state`). Decision: one source of truth for the namespace/ServiceAccount pairing. Rejected duplicating the list in both layers (they could silently drift).
+- **Cluster layer:** free gateway endpoints for DynamoDB and S3 on the private route tables (new `private_route_table_ids` output on the VPC module, backward compatible). Endpoint policy left at default: permissions are already decided by each pod's role, and a restrictive S3 endpoint policy would also need ECR's own layer buckets.
+- Ordering dependency: the permanent layer must be applied before the cluster layer, which reads its outputs.
+
+---
+
+## Reminders (open items)
+
+- [ ] **After Phase 5:** update the GitHub repo description to mention Argo CD, Helm, Prometheus, Grafana and Slack alerts (e.g. "…deployed with Argo CD and Helm, monitored with Prometheus, Grafana and Slack alerts"), and add the topics `argocd`, `helm`, `prometheus`, `grafana`.

@@ -29,3 +29,16 @@ output "slack_webhook_secret_arn" {
   description = "Secrets Manager secret for the Slack webhook (value set via CLI)."
   value       = aws_secretsmanager_secret.slack_webhook.arn
 }
+
+# Read by the cluster layer (terraform_remote_state) to create the Pod Identity
+# associations, so the namespace/ServiceAccount pairing lives in one place.
+output "pod_identity_roles" {
+  description = "Pod Identity role per workload: ARN plus the namespace/ServiceAccount it is locked to."
+  value = {
+    for k, v in local.pod_roles : k => {
+      role_arn        = aws_iam_role.pod[k].arn
+      namespace       = v.namespace
+      service_account = v.service_account
+    }
+  }
+}
