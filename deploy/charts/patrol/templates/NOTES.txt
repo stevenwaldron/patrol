@@ -1,0 +1,4 @@
+Patrol {{ .Values.image.tag }} deployed to namespace {{ .Release.Namespace }}.
+
+  kubectl -n {{ .Release.Namespace }} get cronjob,deploy,pods,svc,ingress
+  kubectl -n {{ .Release.Namespace }} get ingress status-page -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'

@@ -1,0 +1,66 @@
+# Patrol chart values: the "spec sheet" Helm copies into every template.
+# Deploying new code = changing image.tag here in a reviewed commit; Argo CD does the rest.
+
+# The IAM roles (infra/permanent/iam-pod-roles.tf) only trust ServiceAccounts in
+# this namespace, so the chart refuses to render anywhere else.
+expectedNamespace: patrol
+
+image:
+  registry: 419701112481.dkr.ecr.us-east-1.amazonaws.com
+  # Git commit ID the images were built from (./app/push-images.sh prints it).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+aws:
+  region: us-east-1
+  queueUrl: https://sqs.us-east-1.amazonaws.com/419701112481/patrol-checks
+  tableName: patrol-checks
+
+# Sites to monitor. Must match config/sites.yaml (used for local runs);
+# app/tests/test_chart_sites.py fails if the two ever drift apart.
+sites:
+  - id: cloudforger
+    name: CloudForger (Cloud Architecture Platform)
+    url: https://du8elo92f6be7.cloudfront.net
+    timeout_seconds: 10
+  - id: chess
+    name: 3D Multiplayer Chess
+    url: https://db60qckpdzhxr.cloudfront.net
+    timeout_seconds: 10
+  - id: broken-test
+    name: Broken test site (always down, on purpose)
+    url: https://patrol-broken-test.invalid
+    timeout_seconds: 5
+
+scheduler:
+  schedule: "* * * * *"          # every minute
+  # A run takes about a second; anything near this means something is stuck.
+  activeDeadlineSeconds: 50
+  resources:
+    requests: { cpu: 25m, memory: 96Mi }
+    limits: { memory: 192Mi }
+
+worker:
+  replicas: 2
+  threads: 10
+  # Long poll (20 s) + slowest check must finish before Kubernetes force-stops the pod.
+  terminationGracePeriodSeconds: 60
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+statusPage:
+  replicas: 2
+  terminationGracePeriodSeconds: 30
+  # Pause before shutdown so the load balancer stops sending requests first.
+  preStopSleepSeconds: 10
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+ingress:
+  enabled: true
+  className: alb
+  loadBalancerName: patrol
+  # ALB waits this long for in-flight requests when a pod leaves (AWS default is 300 s).
+  deregistrationDelaySeconds: 30

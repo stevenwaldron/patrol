@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."            # repo root: the build needs config/
 
-tag=$(git rev-parse --short HEAD 2>/dev/null || echo local)
+tag=$(git rev-parse --short=7 HEAD 2>/dev/null || echo local)
 for service in scheduler worker status-page; do
   echo "==> building patrol/${service}:${tag}"
   docker build --platform linux/amd64 -f app/Dockerfile --target "$service" \

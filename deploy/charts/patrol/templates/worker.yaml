@@ -1,0 +1,96 @@
+{{- $c := dict "root" . "component" "worker" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "patrol.selectorLabels" $c | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "patrol.labels" $c | nindent 8 }}
+    spec:
+      serviceAccountName: worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- include "patrol.podSecurityContext" . | nindent 8 }}
+      topologySpreadConstraints:
+        {{- include "patrol.topologySpread" $c | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "patrol.image" $c }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- include "patrol.awsEnv" . | nindent 12 }}
+            - name: PATROL_QUEUE_URL
+              value: {{ .Values.aws.queueUrl | quote }}
+            - name: PATROL_WORKER_THREADS
+              value: {{ .Values.worker.threads | quote }}
+            - name: PATROL_HEALTH_PORT
+              value: "9100"
+          ports:
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
+          # /health turns 503 if the poll loop hasn't completed a cycle in 80 s.
+          readinessProbe:
+            httpGet: { path: /health, port: metrics }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: metrics }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- include "patrol.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- include "patrol.tmpVolume" . | nindent 8 }}
+---
+# Gives Prometheus (Phase 5) one stable name to find every worker's /metrics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "patrol.selectorLabels" $c | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+spec:
+  # At most one copy down at a time during node maintenance. maxUnavailable (not
+  # minAvailable) so it can never block a node drain, even at 1 replica.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "patrol.selectorLabels" $c | nindent 6 }}

@@ -197,6 +197,36 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 - **Cluster layer:** `aws_eks_pod_identity_association` for each role, read from the permanent layer's state (`terraform_remote_state`). Decision: one source of truth for the namespace/ServiceAccount pairing. Rejected duplicating the list in both layers (they could silently drift).
 - **Cluster layer:** free gateway endpoints for DynamoDB and S3 on the private route tables (new `private_route_table_ids` output on the VPC module, backward compatible). Endpoint policy left at default: permissions are already decided by each pod's role, and a restrictive S3 endpoint policy would also need ECR's own layer buckets.
 - Ordering dependency: the permanent layer must be applied before the cluster layer, which reads its outputs.
+- **Applied:** plan exactly 12 to add, 0 to change, 0 to destroy (no drift on the existing 12 permanent resources); apply 12 added. `pod_identity_roles` output shows each role locked to its namespace/ServiceAccount (load balancer controller in `kube-system`, the three Patrol services in `patrol`).
+- **Verified in the IAM console:** `patrol-worker` trust policy trusts only `pods.eks.amazonaws.com`, with `StringEquals` on `kubernetes-service-account = worker` and `kubernetes-namespace = patrol`. Screenshots 27–29.
+
+### Phase 3, step 3: image push script + Patrol Helm chart
+
+**`app/push-images.sh`**
+- Refuses to run with uncommitted changes, so tag = commit always means "exactly this code". Tag length pinned with `git rev-parse --short=7` (also in `build-images.sh`), so both scripts always agree.
+- Account guard, ECR login via short-lived token piped to `docker login --password-stdin` (never on screen or in history).
+- Skips a tag already in ECR. Decision: skip rather than fail, because tags are immutable and re-running the script should be harmless.
+- Builds any image not built locally, then prints ECR's scan-on-push severity counts and the exact `tag:` line to put in `values.yaml`.
+- Verified with stand-in `aws`/`docker`/`git`: pushed the missing images, skipped the one already in ECR, built the one not built locally, exited 1 on an uncommitted change. ShellCheck clean.
+
+**Chart `deploy/charts/patrol` (12 objects):** 3 ServiceAccounts, sites ConfigMap, scheduler CronJob, worker + status-page Deployments, 2 Services, 2 PodDisruptionBudgets, Ingress.
+- Decision: one chart for the whole app, with shared snippets in `_helpers.tpl` (labels, security settings, AWS env, zone spread). Rejected copy-pasted manifests (the image tag alone would sit in 3 places).
+- Decision: `values.schema.json` validates values before rendering: image tag must be 7–40 hex characters (so `latest` is rejected), site IDs must match the app's own rule, queue URL and registry formats checked.
+- Decision: **render guards.** The chart refuses to render outside namespace `patrol` (the IAM roles only trust it) or without an image tag, each with a plain-English error. Both tested.
+- Decision: `automountServiceAccountToken: false` on all ServiceAccounts and pods. No Patrol pod calls the Kubernetes API. Verified first in the EKS docs that Pod Identity delivers its own projected token (`eks-pod-identity-token`, audience `pods.eks.amazonaws.com`), so AWS access is unaffected.
+- Decision: security on every pod: non-root uid 10001, `seccompProfile: RuntimeDefault`, no privilege escalation, all capabilities dropped, **read-only root filesystem** (small capped `emptyDir` at `/tmp` in case a library needs scratch space). These are exactly the rules Kyverno will enforce in Phase 6.
+- Decision: CPU and memory requests on everything, memory limits, **no CPU limits**. A CPU limit throttles a container even when the node has idle CPU; memory limits stop a leak from taking the node down. Trade-off: one busy pod can use spare CPU (acceptable; requests still guarantee everyone their share).
+- Decision: zone spread with `ScheduleAnyway` (prefer, don't insist). Rejected `DoNotSchedule`: if a zone's node is unhealthy but still registered, a replacement pod could stay Pending. Availability first; Phase 8 drills will test it.
+- Decision: PodDisruptionBudgets use `maxUnavailable: 1`, not `minAvailable: 1`. At 1 replica (possible once KEDA scales the worker), `minAvailable: 1` would block every node drain.
+- Decision: rolling updates `maxSurge: 1, maxUnavailable: 0`: a new copy must be Ready before an old one leaves.
+- Scheduler CronJob: `concurrencyPolicy: Forbid`, `startingDeadlineSeconds: 30`, `backoffLimit: 0` (a failed run is replaced by the next minute's run; retries would issue duplicate orders), 50 s deadline, UTC time zone, finished jobs cleaned up after 10 min.
+- Worker: `terminationGracePeriodSeconds: 60` (20 s long poll + slowest check) so the SIGTERM handler can finish its batch; probes on `/health` (503 if the poll loop stalls for 80 s).
+- Status page: readiness `/ready`, liveness `/health`, and a **preStop sleep of 10 s** (native Kubernetes sleep action, no shell needed) so the ALB stops sending traffic before the pod exits. ALB deregistration delay cut from 300 s to 30 s.
+- Decision: Ingress in **IP target mode**, internet-facing, HTTP only for now. **`/metrics` blocked at the ALB** with a fixed 404 response, so internal metrics are never public. Load balancer named `patrol`, tagged `Project=patrol,Layer=cluster`.
+- Decision: site list lives in two places (Helm can only read files inside the chart; local runs use `config/sites.yaml`). New test `test_chart_sites.py` fails if they drift. Mutation-checked: changing one timeout in the chart made it fail.
+- Worker gets a Service too (port 9100, `metrics`), only so Prometheus can find it in Phase 5.
+- **Verification (workspace):** Helm 4.3.1 + kubeconform 0.8.0 (checksums verified; `get.helm.sh` is blocked there, so Helm came from the conda-forge build). `helm lint` clean; `helm template` renders 12 objects; **kubeconform strict against Kubernetes 1.36: 12 valid, 0 invalid**. A cross-check script confirmed every ServiceAccount matches a Terraform Pod Identity role in namespace `patrol`, every image matches an ECR repo, every `PATROL_*` variable exists in `config.py`, and ports match the Dockerfile. Tests: 30 passed.
+- **Surprise.** Helm 4 is now the current major version (4.3.1); most tutorials still show Helm 3. Charts use the same `apiVersion: v2` format.
 
 ---
 

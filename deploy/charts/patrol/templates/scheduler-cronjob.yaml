@@ -1,0 +1,60 @@
+{{- $c := dict "root" . "component" "scheduler" }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scheduler
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+spec:
+  schedule: {{ .Values.scheduler.schedule | quote }}
+  timeZone: Etc/UTC
+  # Never run two at once; if a run is somehow still going, skip the next one.
+  concurrencyPolicy: Forbid
+  # A run that couldn't start within 30 s is skipped: the next minute's run replaces it.
+  startingDeadlineSeconds: 30
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # No retries: a failed run is simply replaced by the next minute's run
+      # (and stale orders are discarded by the workers anyway).
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.scheduler.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            {{- include "patrol.labels" $c | nindent 12 }}
+          annotations:
+            {{- include "patrol.sitesChecksum" . | nindent 12 }}
+        spec:
+          serviceAccountName: scheduler
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            {{- include "patrol.podSecurityContext" . | nindent 12 }}
+          containers:
+            - name: scheduler
+              image: {{ include "patrol.image" $c }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              env:
+                {{- include "patrol.awsEnv" . | nindent 16 }}
+                - name: PATROL_QUEUE_URL
+                  value: {{ .Values.aws.queueUrl | quote }}
+                - name: PATROL_SITES_FILE
+                  value: /app/config/sites.yaml
+              resources:
+                {{- toYaml .Values.scheduler.resources | nindent 16 }}
+              securityContext:
+                {{- include "patrol.containerSecurityContext" . | nindent 16 }}
+              volumeMounts:
+                - name: sites
+                  mountPath: /app/config
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: sites
+              configMap:
+                name: patrol-sites
+            {{- include "patrol.tmpVolume" . | nindent 12 }}
