@@ -1,0 +1,36 @@
+# Patrol itself: the Helm chart in this repo (deploy/charts/patrol).
+# Deploying a new version = changing image.tag in that chart's values.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: patrol
+  namespace: argocd
+  annotations:
+    # Wave 0: after the load balancer controller (wave -1) is healthy.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    # Deleting this app deletes Patrol's objects, including the Ingress, so the
+    # (still running) controller removes the ALB. infra/down.sh relies on this.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/stevenwaldron/patrol.git
+    targetRevision: main
+    path: deploy/charts/patrol
+    helm:
+      releaseName: patrol
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: patrol   # the IAM roles only trust this namespace
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    managedNamespaceMetadata:
+      labels:
+        # The controller adds a readiness gate to every new Patrol pod: a rolling
+        # update only continues once the ALB itself reports the new pod healthy.
+        elbv2.k8s.aws/pod-readiness-gate-inject: enabled

@@ -1,0 +1,50 @@
+# AWS Load Balancer Controller v3.6.2 (AWS's official Helm chart; chart version
+# = controller version since v3). Turns Patrol's Ingress into an ALB.
+# Its AWS permissions come from the Pod Identity role
+# patrol-aws-load-balancer-controller (infra/permanent/iam-pod-roles.tf), which
+# only trusts ServiceAccount kube-system/aws-load-balancer-controller.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-load-balancer-controller
+  namespace: argocd
+  annotations:
+    # Wave -1: installed and HEALTHY before Patrol (wave 0) starts.
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    targetRevision: 3.6.2
+    helm:
+      releaseName: aws-load-balancer-controller
+      valuesObject:
+        clusterName: patrol
+        region: us-east-1
+        # Pods can't reach the node's metadata service (hop limit 1, on purpose),
+        # so the controller can't discover the VPC itself. The VPC ID changes on
+        # every rebuild, so it can't live in Git; the VPC's Name tag never does.
+        vpcTags:
+          Name: patrol-lab-vpc
+        serviceAccount:
+          create: true
+          name: aws-load-balancer-controller   # must match the Pod Identity association
+        # Two copies: its webhook must answer whenever pods are created in the
+        # patrol namespace (to add the ALB readiness gate).
+        replicaCount: 2
+        # Patrol uses an Ingress, not LoadBalancer Services; don't take over
+        # every new LoadBalancer Service in the cluster.
+        enableServiceMutatorWebhook: false
+        resources:
+          requests: { cpu: 50m, memory: 128Mi }
+          limits: { memory: 256Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

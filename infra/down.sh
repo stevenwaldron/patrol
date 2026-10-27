@@ -32,13 +32,45 @@ k8s_load_balancers() {
     --query 'ResourceTagMappingList[].ResourceARN' --output text
 }
 
+wait_for_load_balancers_gone() {
+  echo "==> Waiting for AWS to finish deleting Kubernetes-created load balancers"
+  for _ in $(seq 1 30); do
+    [[ -z "$(k8s_load_balancers)" ]] && return 0
+    sleep 10
+  done
+  echo "Load balancers still exist; terraform destroy would fail on the VPC:" >&2
+  k8s_load_balancers >&2
+  echo "Delete them (EC2 console > Load Balancers), then rerun this script." >&2
+  exit 1
+}
+
+argo() { kubectl --context "$CLUSTER" -n argocd "$@"; }
+
 if kubectl --context "$CLUSTER" get namespaces >/dev/null 2>&1; then
-  # Phase 3+: Argo CD would recreate anything deleted below, so its apps go first.
+  # Phase 3+ order. The load balancer controller is the only thing that can
+  # delete the ALB, so it must still be running when Patrol's Ingress goes.
+  # Deleting every Argo CD app at once could remove the controller first and
+  # orphan the ALB (still billing, blocking VPC deletion).
   if kubectl --context "$CLUSTER" get crd applications.argoproj.io >/dev/null 2>&1; then
-    echo "==> Deleting Argo CD applications (so they can't recreate load balancers)"
-    kubectl --context "$CLUSTER" delete applications.argoproj.io --all -A --wait=true --timeout=5m || true
+    # 1. Detach the root app WITHOUT cascading (remove its finalizer, then delete
+    #    it), so it stops recreating the child apps but doesn't delete them all at once.
+    if argo get applications.argoproj.io root >/dev/null 2>&1; then
+      echo "==> Detaching the root app (children stay, deleted one by one below)"
+      argo patch applications.argoproj.io root --type json \
+        -p '[{"op":"remove","path":"/metadata/finalizers"}]' >/dev/null 2>&1 || true
+      argo delete applications.argoproj.io root --wait=true --timeout=2m || true
+    fi
+    # 2. Delete Patrol's app. Its finalizer makes Argo CD delete Patrol's objects,
+    #    including the Ingress; the still-running controller then deletes the ALB.
+    if argo get applications.argoproj.io patrol >/dev/null 2>&1; then
+      echo "==> Deleting the Patrol app (the controller removes its ALB)"
+      argo delete applications.argoproj.io patrol --wait=true --timeout=5m || true
+    fi
   fi
-  echo "==> Deleting Ingresses and LoadBalancer Services"
+
+  # 3. Safety net, still while the controller runs: any other Ingress or
+  #    LoadBalancer Service (for example one created by hand while testing).
+  echo "==> Deleting any remaining Ingresses and LoadBalancer Services"
   kubectl --context "$CLUSTER" delete ingress --all -A --wait=true --timeout=5m || true
   kubectl --context "$CLUSTER" get svc -A \
     -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' |
@@ -47,21 +79,19 @@ if kubectl --context "$CLUSTER" get namespaces >/dev/null 2>&1; then
         kubectl --context "$CLUSTER" delete svc -n "$ns" "$name" --wait=true --timeout=5m
       fi
     done
+
+  # 4. Only once AWS confirms the load balancers are gone, remove the rest.
+  wait_for_load_balancers_gone
+  if kubectl --context "$CLUSTER" get crd applications.argoproj.io >/dev/null 2>&1; then
+    echo "==> Deleting the remaining Argo CD apps (load balancer controller)"
+    argo delete applications.argoproj.io --all --wait=true --timeout=5m || true
+  fi
 else
   echo "==> Cluster API not reachable (already gone, or your IP changed). Skipping Kubernetes cleanup."
 fi
 
-echo "==> Waiting for AWS to finish deleting Kubernetes-created load balancers"
-for _ in $(seq 1 30); do
-  [[ -z "$(k8s_load_balancers)" ]] && break
-  sleep 10
-done
-if [[ -n "$(k8s_load_balancers)" ]]; then
-  echo "Load balancers still exist; terraform destroy would fail on the VPC:" >&2
-  k8s_load_balancers >&2
-  echo "Delete them (EC2 console > Load Balancers), then rerun this script." >&2
-  exit 1
-fi
+# Again (cheap), in case the Kubernetes cleanup was skipped above.
+wait_for_load_balancers_gone
 
 # The variable is required, but its value doesn't matter for a destroy.
 ip=$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]' || echo 203.0.113.1)

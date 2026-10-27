@@ -1,0 +1,26 @@
+# The root "app of apps". infra/up.sh applies this ONE file by hand; from then on
+# Argo CD reads deploy/argocd/apps/ from GitHub and installs each app defined there.
+# Adding a component to the cluster = adding an Application file to that folder.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    # Deleting this app deletes what it created (the child Applications).
+    # infra/down.sh removes this finalizer first, so it can tear the children
+    # down one at a time, in a safe order.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/stevenwaldron/patrol.git
+    targetRevision: main
+    path: deploy/argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

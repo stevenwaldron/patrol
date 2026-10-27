@@ -31,7 +31,7 @@ locals {
     aws-load-balancer-controller = {
       namespace       = "kube-system"
       service_account = "aws-load-balancer-controller"
-      description     = "AWS Load Balancer Controller v2.17.1: manage ALBs for Ingresses"
+      description     = "AWS Load Balancer Controller: manage ALBs for Ingresses"
     }
   }
 
@@ -76,8 +76,9 @@ locals {
     })
 
     # Official policy published with the controller, pinned to the controller
-    # version we install. Upgrading the controller = replacing this file too.
-    aws-load-balancer-controller = file("${path.module}/policies/aws-load-balancer-controller-v2.17.1.json")
+    # version we install (file name = version). Upgrading the controller means
+    # diffing its new iam_policy.json against this file and replacing it if changed.
+    aws-load-balancer-controller = file("${path.module}/policies/aws-load-balancer-controller-v3.6.2.json")
   }
 }
 
