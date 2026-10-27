@@ -6,7 +6,17 @@
 # Base image comes from ECR Public's mirror of the official Python image, not
 # Docker Hub: same image, but no Docker Hub anonymous pull limits (which shared
 # CI runners hit), and it's served from AWS, close to the cluster.
-ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.13-slim
+#
+# Pinned by DIGEST (its exact fingerprint), not just by name. The name
+# "3.13-slim" is quietly repointed whenever Debian or Python ship updates, so the
+# same commit could build a different image on different days, and the image tag
+# (= commit ID) would stop meaning one exact build. Updating the base is now a
+# deliberate one-line commit, which produces a new tag.
+#   Pinned 2026-10-26: glibc 2.41-12+deb13u4, zlib 1.3.1-1+b1 (Debian 13 "trixie").
+#   Find the current digest:
+#     docker pull public.ecr.aws/docker/library/python:3.13-slim
+#     docker image inspect --format '{{index .RepoDigests 0}}' public.ecr.aws/docker/library/python:3.13-slim
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
 
 # ---- Stage 1: install dependencies into a virtual environment ---------------
 # Only requirements.txt is copied first, so this slow layer is cached and
