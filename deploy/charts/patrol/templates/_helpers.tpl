@@ -58,7 +58,13 @@ capabilities:
 checksum/sites: {{ toYaml .Values.sites | sha256sum }}
 {{- end }}
 
-{{/* Spread copies across zones; prefer, but don't insist, so a lost zone can't block rescheduling. */}}
+{{/*
+Spread copies across zones and nodes; prefer, but don't insist, so a lost zone
+can't block rescheduling.
+matchLabelKeys [pod-template-hash]: count only pods from the SAME rollout. Without
+it, the old ReplicaSet's pods (still shutting down mid-rollout) are counted too,
+so the scheduler can put every new copy on one node (seen in the first live run).
+*/}}
 {{- define "patrol.topologySpread" -}}
 - maxSkew: 1
   topologyKey: topology.kubernetes.io/zone
@@ -66,12 +72,14 @@ checksum/sites: {{ toYaml .Values.sites | sha256sum }}
   labelSelector:
     matchLabels:
       {{- include "patrol.selectorLabels" . | nindent 6 }}
+  matchLabelKeys: ["pod-template-hash"]
 - maxSkew: 1
   topologyKey: kubernetes.io/hostname
   whenUnsatisfiable: ScheduleAnyway
   labelSelector:
     matchLabels:
       {{- include "patrol.selectorLabels" . | nindent 6 }}
+  matchLabelKeys: ["pod-template-hash"]
 {{- end }}
 
 {{/* Scratch space: the root filesystem is read-only, so anything that needs /tmp gets a small scratch folder (on node disk, capped, deleted with the pod). */}}

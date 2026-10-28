@@ -11,7 +11,7 @@ metadata:
   finalizers:
     # Deleting this app deletes Patrol's objects, including the Ingress, so the
     # (still running) controller removes the ALB. infra/down.sh relies on this.
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/foreground
 spec:
   project: default
   source:

@@ -12,7 +12,7 @@ metadata:
     # Wave -1: installed and HEALTHY before Patrol (wave 0) starts.
     argocd.argoproj.io/sync-wave: "-1"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/foreground
 spec:
   project: default
   source:

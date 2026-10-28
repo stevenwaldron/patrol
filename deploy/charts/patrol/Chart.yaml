@@ -3,7 +3,7 @@ name: patrol
 description: Patrol uptime monitor (scheduler CronJob, worker and status page Deployments) for Amazon EKS
 type: application
 # Chart version: bump when the chart's templates change.
-version: 0.1.0
+version: 0.1.1
 # The app version deployed is set by image.tag in values.yaml (a Git commit ID),
 # so appVersion is informational only.
 appVersion: "0.1.0"
