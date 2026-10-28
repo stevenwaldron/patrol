@@ -58,3 +58,19 @@ resource "aws_route53_record" "cert_validation" {
 # apply wait until the IONOS delegation (a manual step that comes AFTER this
 # apply) has spread. ACM issues the certificate on its own once it can see the
 # record; infra/up.sh refuses to build the cluster until it is ISSUED.
+
+# The zone's SOA record, managed so its "minimum TTL" can be lowered.
+# Resolvers cache a "no such record" answer for the LESSER of this minimum and
+# the SOA record's own TTL (AWS docs, "NS and SOA records"). Route 53's defaults
+# (86400 and 900) let a too-early lookup be remembered for 15 minutes, which made
+# up.sh's final check fail twice while the site was actually up. 60 s instead.
+# Every other field is Route 53's default. Route 53 never deletes a zone's SOA,
+# so this record lives exactly as long as the zone (which is prevent_destroy).
+resource "aws_route53_record" "soa" {
+  zone_id         = aws_route53_zone.main.zone_id
+  name            = var.domain_name
+  type            = "SOA"
+  ttl             = 900
+  records         = ["${aws_route53_zone.main.primary_name_server}. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 60"]
+  allow_overwrite = true
+}

@@ -23,7 +23,7 @@ if [[ "$account" != "$EXPECTED_ACCOUNT" ]]; then
   exit 1
 fi
 
-for tool in terraform kubectl helm aws curl; do
+for tool in terraform kubectl helm aws curl dig; do
   command -v "$tool" >/dev/null || { echo "Missing tool: $tool" >&2; exit 1; }
 done
 
@@ -96,45 +96,88 @@ wait_for_app() {  # wait_for_app NAME TIMEOUT_SECONDS
 echo "==> Waiting for Argo CD: load balancer controller first (wave -1), then Patrol (wave 0)"
 wait_for_app aws-load-balancer-controller 600
 wait_for_app patrol 900
+apps_ready=$(date +%s)
 
-echo "==> Waiting for the status page to answer"
+echo "==> Waiting for the load balancer to be active"
+lb_host=""
+for _ in $(seq 1 30); do
+  lb_host=$(kubectl --context "$CLUSTER" -n patrol get ingress status-page \
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+  if [[ -n "$lb_host" ]]; then break; fi
+  sleep 10
+done
+lb_state=""
+for _ in $(seq 1 60); do
+  lb_state=$(aws elbv2 describe-load-balancers --profile "$PROFILE" --region "$REGION" \
+    --query "LoadBalancers[?DNSName=='${lb_host}'].State.Code | [0]" --output text 2>/dev/null || true)
+  if [[ "$lb_state" == "active" ]]; then break; fi
+  sleep 10
+done
+echo "    ${lb_host:-<no address>}: ${lb_state:-unknown}"
+
+# Success is judged by asking AWS's OWN nameserver for the address and connecting
+# straight to it. Looking the name up through this machine's normal DNS can hit a
+# cached "doesn't exist" from an earlier lookup (that false alarm happened on two
+# runs), so the normal-DNS result is shown for information only.
+up=false
 url=""
 if [[ -n "$DOMAIN" ]]; then
-  # Wait for ExternalDNS to create the record BEFORE looking the name up: a lookup
-  # that finds nothing gets cached as "doesn't exist" (up to 15 min on Route 53).
+  url="https://${DOMAIN}"
   zone_id=$(aws route53 list-hosted-zones-by-name --profile "$PROFILE" --dns-name "$DOMAIN" \
-    --query 'HostedZones[0].Id' --output text)
+    --query "HostedZones[?Name=='${DOMAIN}.'].Id | [0]" --output text)
+  ns=$(aws route53 get-hosted-zone --profile "$PROFILE" --id "$zone_id" \
+    --query 'DelegationSet.NameServers[0]' --output text)
+  echo "==> Waiting for ExternalDNS to point ${DOMAIN} at it"
   record=""
   for _ in $(seq 1 30); do
     record=$(aws route53 list-resource-record-sets --profile "$PROFILE" --hosted-zone-id "$zone_id" \
       --query "ResourceRecordSets[?Name=='${DOMAIN}.' && Type=='A'].AliasTarget.DNSName | [0]" --output text)
-    if [[ -n "$record" && "$record" != "None" ]]; then break; fi
+    if [[ "${record%.}" == "$lb_host" ]]; then break; fi
     sleep 10
   done
-  echo "    ExternalDNS record: ${DOMAIN} -> ${record}"
-  url="https://${DOMAIN}"
+  echo "    ${DOMAIN} -> ${record}"
+  echo "==> Checking HTTPS (address from AWS's nameserver ${ns})"
+  for _ in $(seq 1 30); do
+    ip=$(dig +short A "$DOMAIN" @"$ns" | grep -E '^[0-9.]+$' | head -1 || true)
+    if [[ -n "$ip" ]] && curl -fsS -o /dev/null --max-time 5 \
+         --resolve "${DOMAIN}:443:${ip}" "${url}/ready" 2>/dev/null; then
+      up=true
+      break
+    fi
+    sleep 10
+  done
 else
-  host=$(kubectl --context "$CLUSTER" -n patrol get ingress status-page \
-    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-  url="http://${host}"
+  url="http://${lb_host}"
+  for _ in $(seq 1 30); do
+    if curl -fsS -o /dev/null --max-time 5 "${url}/ready" 2>/dev/null; then
+      up=true
+      break
+    fi
+    sleep 10
+  done
 fi
-up=false
-for _ in $(seq 1 60); do
-  if curl -fsS -o /dev/null --max-time 5 "${url}/ready" 2>/dev/null; then
-    up=true
-    break
-  fi
-  sleep 10
-done
+
 if [[ "$up" == true ]]; then
   echo "==> Status page: ${url}/"
+  if [[ -n "$DOMAIN" ]]; then
+    if curl -fsS -o /dev/null --max-time 5 "${url}/ready" 2>/dev/null; then
+      echo "    (this machine's DNS sees it too)"
+    else
+      echo "    (live, but this machine's DNS hasn't caught up yet: an earlier lookup is"
+      echo "     cached for up to a minute. Other machines see it now.)"
+    fi
+  fi
 else
-  echo "Status page not answering yet at ${url}/ (DNS may still be spreading; try again in a few minutes)." >&2
+  echo "Status page did NOT answer at ${url}/ (load balancer: ${lb_state:-unknown})." >&2
+  echo "This is not a DNS cache issue: check the Ingress and pods:" >&2
+  echo "  kubectl --context $CLUSTER -n patrol describe ingress status-page" >&2
 fi
 
 finished=$(date +%s)
-printf '==> Argo CD + apps took %dm %02ds after the nodes were Ready\n' \
-  $(( (finished - nodes_ready) / 60 )) $(( (finished - nodes_ready) % 60 ))
+printf '==> Argo CD + apps healthy %dm %02ds after the nodes were Ready\n' \
+  $(( (apps_ready - nodes_ready) / 60 )) $(( (apps_ready - nodes_ready) % 60 ))
+printf '==> Load balancer + DNS + HTTPS check took %dm %02ds more\n' \
+  $(( (finished - apps_ready) / 60 )) $(( (finished - apps_ready) % 60 ))
 printf '==> Everything up in %dm %02ds\n' $(( (finished - started) / 60 )) $(( (finished - started) % 60 ))
 
 cat <<EOF
