@@ -36,6 +36,12 @@ spec:
         policy: sync
         registry: txt
         txtOwnerId: patrol
+        # Ownership records named "<type>.<record>" (a.mypatrolapp.cloud) so they
+        # stay INSIDE the zone. Without a prefix, the apex record's ownership name
+        # becomes "a-mypatrolapp.cloud": a different domain, silently skipped, so
+        # ExternalDNS could never prove it owned (and could never update or delete)
+        # the apex record. Upstream bug: kubernetes-sigs/external-dns#4234.
+        txtPrefix: "%{record_type}."
         extraArgs:
           - --aws-zone-type=public
         resources:
