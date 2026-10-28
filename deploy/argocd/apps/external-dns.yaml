@@ -42,6 +42,9 @@ spec:
         # ExternalDNS could never prove it owned (and could never update or delete)
         # the apex record. Upstream bug: kubernetes-sigs/external-dns#4234.
         txtPrefix: "%{record_type}."
+        # React to Ingress changes immediately (not only on the 1-minute loop),
+        # so a deleted Ingress's records are removed within seconds at teardown.
+        triggerLoopOnEvent: true
         extraArgs:
           - --aws-zone-type=public
         resources:

@@ -11,6 +11,7 @@
 # then run terraform destroy, then confirm nothing was left behind.
 set -euo pipefail
 cd "$(dirname "$0")/cluster"
+REPO_ROOT=$(cd ../.. && pwd)
 
 PROFILE=patrol
 EXPECTED_ACCOUNT=419701112481
@@ -46,6 +47,33 @@ wait_for_load_balancers_gone() {
 
 argo() { kubectl --context "$CLUSTER" -n argocd "$@"; }
 
+# Patrol's public hostname (empty = no domain, nothing to wait for).
+DOMAIN=$(awk '/^  host:/ {gsub(/"/, "", $2); print $2}' "$REPO_ROOT/deploy/charts/patrol/values.yaml")
+
+# ExternalDNS must remove the domain's records BEFORE ExternalDNS itself is
+# deleted (same idea as waiting for the ALB). If it doesn't within 3 minutes,
+# warn and carry on: leftover records are owned (owner=patrol), so the next
+# rebuild's ExternalDNS repoints them; stopping the teardown would cost more.
+wait_for_dns_records_gone() {
+  [[ -n "$DOMAIN" ]] || return 0
+  local zone_id count=""
+  zone_id=$(aws route53 list-hosted-zones-by-name --profile "$PROFILE" --dns-name "$DOMAIN" \
+    --query "HostedZones[?Name=='${DOMAIN}.'].Id | [0]" --output text)
+  if [[ -z "$zone_id" || "$zone_id" == "None" ]]; then return 0; fi
+  echo "==> Waiting for ExternalDNS to remove ${DOMAIN}'s DNS records"
+  for _ in $(seq 1 18); do
+    count=$(aws route53 list-resource-record-sets --profile "$PROFILE" --hosted-zone-id "$zone_id" \
+      --query "length(ResourceRecordSets[?Name=='${DOMAIN}.' && (Type=='A' || Type=='AAAA')])" --output text)
+    if [[ "$count" == "0" ]]; then
+      echo "    removed"
+      return 0
+    fi
+    sleep 10
+  done
+  echo "WARNING: ${DOMAIN} still has ${count} A/AAAA record(s) after 3 minutes. Continuing the teardown." >&2
+  echo "         They are owned by Patrol's ExternalDNS (owner=patrol); the next up.sh repoints them." >&2
+}
+
 if kubectl --context "$CLUSTER" get namespaces >/dev/null 2>&1; then
   # Phase 3+ order. The load balancer controller is the only thing that can
   # delete the ALB, so it must still be running when Patrol's Ingress goes.
@@ -80,10 +108,12 @@ if kubectl --context "$CLUSTER" get namespaces >/dev/null 2>&1; then
       fi
     done
 
-  # 4. Only once AWS confirms the load balancers are gone, remove the rest.
+  # 4. Only once AWS confirms the load balancers are gone AND ExternalDNS has
+  #    removed the domain's records, remove the rest (controller, ExternalDNS).
   wait_for_load_balancers_gone
+  wait_for_dns_records_gone
   if kubectl --context "$CLUSTER" get crd applications.argoproj.io >/dev/null 2>&1; then
-    echo "==> Deleting the remaining Argo CD apps (load balancer controller)"
+    echo "==> Deleting the remaining Argo CD apps (load balancer controller, ExternalDNS)"
     argo delete applications.argoproj.io --all --wait=true --timeout=5m || true
   fi
 else
