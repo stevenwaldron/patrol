@@ -35,6 +35,22 @@ if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 echo "==> Cluster API will accept connections from ${ip}/32 only"
 
+# HTTPS needs the ACM certificate ISSUED (it is once the IONOS delegation to
+# Route 53 has spread). Without it the controller can't create the HTTPS
+# listener, so don't start paying for a cluster that can't serve.
+DOMAIN=$(awk '/^  host:/ {gsub(/"/, "", $2); print $2}' "$REPO_ROOT/deploy/charts/patrol/values.yaml")
+if [[ -n "$DOMAIN" ]]; then
+  cert=$(aws acm list-certificates --profile "$PROFILE" --region "$REGION" \
+    --certificate-statuses ISSUED \
+    --query "CertificateSummaryList[?DomainName=='${DOMAIN}'].CertificateArn | [0]" --output text)
+  if [[ -z "$cert" || "$cert" == "None" ]]; then
+    echo "No ISSUED certificate for ${DOMAIN} yet. Check the IONOS name servers, then:" >&2
+    echo "  cd infra/permanent && AWS_PROFILE=patrol terraform output certificate_status" >&2
+    exit 1
+  fi
+  echo "==> Certificate for ${DOMAIN} is ISSUED"
+fi
+
 AWS_PROFILE=$PROFILE terraform init -input=false
 AWS_PROFILE=$PROFILE terraform apply -var "admin_cidrs=[\"${ip}/32\"]"
 
@@ -81,21 +97,39 @@ echo "==> Waiting for Argo CD: load balancer controller first (wave -1), then Pa
 wait_for_app aws-load-balancer-controller 600
 wait_for_app patrol 900
 
-echo "==> Waiting for the status page to answer through the load balancer"
-host=$(kubectl --context "$CLUSTER" -n patrol get ingress status-page \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+echo "==> Waiting for the status page to answer"
+url=""
+if [[ -n "$DOMAIN" ]]; then
+  # Wait for ExternalDNS to create the record BEFORE looking the name up: a lookup
+  # that finds nothing gets cached as "doesn't exist" (up to 15 min on Route 53).
+  zone_id=$(aws route53 list-hosted-zones-by-name --profile "$PROFILE" --dns-name "$DOMAIN" \
+    --query 'HostedZones[0].Id' --output text)
+  record=""
+  for _ in $(seq 1 30); do
+    record=$(aws route53 list-resource-record-sets --profile "$PROFILE" --hosted-zone-id "$zone_id" \
+      --query "ResourceRecordSets[?Name=='${DOMAIN}.' && Type=='A'].AliasTarget.DNSName | [0]" --output text)
+    if [[ -n "$record" && "$record" != "None" ]]; then break; fi
+    sleep 10
+  done
+  echo "    ExternalDNS record: ${DOMAIN} -> ${record}"
+  url="https://${DOMAIN}"
+else
+  host=$(kubectl --context "$CLUSTER" -n patrol get ingress status-page \
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+  url="http://${host}"
+fi
 up=false
-for _ in $(seq 1 60); do   # a new ALB's DNS name can take a few minutes to resolve
-  if curl -fsS -o /dev/null --max-time 5 "http://${host}/ready" 2>/dev/null; then
+for _ in $(seq 1 60); do
+  if curl -fsS -o /dev/null --max-time 5 "${url}/ready" 2>/dev/null; then
     up=true
     break
   fi
   sleep 10
 done
 if [[ "$up" == true ]]; then
-  echo "==> Status page: http://${host}/"
+  echo "==> Status page: ${url}/"
 else
-  echo "Status page not answering yet at http://${host}/ (DNS may still be propagating; try again in a few minutes)." >&2
+  echo "Status page not answering yet at ${url}/ (DNS may still be spreading; try again in a few minutes)." >&2
 fi
 
 finished=$(date +%s)

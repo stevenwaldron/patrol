@@ -33,6 +33,11 @@ locals {
       service_account = "aws-load-balancer-controller"
       description     = "AWS Load Balancer Controller: manage ALBs for Ingresses"
     }
+    external-dns = {
+      namespace       = "external-dns"
+      service_account = "external-dns"
+      description     = "ExternalDNS: point Patrol's domain at the current ALB"
+    }
   }
 
   # Least privilege: each workload gets exactly the actions its code calls.
@@ -73,6 +78,31 @@ locals {
         Action   = ["dynamodb:Query"]
         Resource = aws_dynamodb_table.checks.arn
       }]
+    })
+
+    # From the ExternalDNS AWS guide, narrowed: record changes and reads only in
+    # Patrol's own zone (the guide allows every hosted zone in the account).
+    # Listing zones can't be scoped to one zone, so that one action is "*".
+    external-dns = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Sid    = "ManagePatrolRecords"
+          Effect = "Allow"
+          Action = [
+            "route53:ChangeResourceRecordSets",
+            "route53:ListResourceRecordSets",
+            "route53:ListTagsForResources",
+          ]
+          Resource = aws_route53_zone.main.arn
+        },
+        {
+          Sid      = "FindZones"
+          Effect   = "Allow"
+          Action   = ["route53:ListHostedZones"]
+          Resource = "*"
+        }
+      ]
     })
 
     # Official policy published with the controller, pinned to the controller

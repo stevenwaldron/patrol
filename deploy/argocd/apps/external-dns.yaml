@@ -1,0 +1,52 @@
+# ExternalDNS (chart 1.23.0 = ExternalDNS v0.23.0). Watches Ingresses and keeps
+# Route 53 pointing mypatrolapp.cloud at the CURRENT ALB, which gets a new
+# address on every rebuild. Its AWS access comes from the Pod Identity role
+# patrol-external-dns, which can only change records in Patrol's own zone.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-dns
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: default
+  source:
+    repoURL: https://kubernetes-sigs.github.io/external-dns/
+    chart: external-dns
+    targetRevision: 1.23.0
+    helm:
+      releaseName: external-dns
+      valuesObject:
+        provider:
+          name: aws
+        env:
+          - name: AWS_DEFAULT_REGION
+            value: us-east-1
+        serviceAccount:
+          create: true
+          name: external-dns   # must match the Pod Identity association
+        sources: ["ingress"]
+        domainFilters: ["mypatrolapp.cloud"]   # never touch any other domain
+        # sync = also DELETE records whose Ingress is gone (keeps the zone clean
+        # after teardown). Safe because of the ownership records below:
+        # ExternalDNS only ever changes records it created itself.
+        policy: sync
+        registry: txt
+        txtOwnerId: patrol
+        extraArgs:
+          - --aws-zone-type=public
+        resources:
+          requests: { cpu: 25m, memory: 64Mi }
+          limits: { memory: 128Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-dns   # the IAM role only trusts this namespace
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

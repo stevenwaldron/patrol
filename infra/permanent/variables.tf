@@ -45,3 +45,9 @@ variable "max_receive_count" {
   type        = number
   default     = 3
 }
+
+variable "domain_name" {
+  description = "Patrol's public domain (registered at IONOS; DNS delegated to Route 53)."
+  type        = string
+  default     = "mypatrolapp.cloud"
+}

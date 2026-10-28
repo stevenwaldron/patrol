@@ -74,6 +74,8 @@
         "enabled": { "type": "boolean" },
         "className": { "type": "string" },
         "loadBalancerName": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,32}$" },
+        "host": { "type": "string", "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$|^$" },
+        "sslPolicy": { "type": "string", "pattern": "^ELBSecurityPolicy-" },
         "deregistrationDelaySeconds": { "type": "integer", "minimum": 0, "maximum": 3600 }
       }
     }

@@ -42,3 +42,18 @@ output "pod_identity_roles" {
     }
   }
 }
+
+output "name_servers" {
+  description = "Paste these 4 into IONOS (domain > Nameservers > use custom name servers)."
+  value       = aws_route53_zone.main.name_servers
+}
+
+output "certificate_arn" {
+  description = "ACM certificate for the domain and *.domain (the controller finds it by hostname)."
+  value       = aws_acm_certificate.main.arn
+}
+
+output "certificate_status" {
+  description = "PENDING_VALIDATION until the IONOS delegation has spread, then ISSUED."
+  value       = aws_acm_certificate.main.status
+}

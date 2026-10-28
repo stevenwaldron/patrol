@@ -3,7 +3,9 @@
 # The AWS Load Balancer Controller turns this into an internet-facing ALB.
 # IP target mode: the ALB sends traffic straight to status-page pod IPs
 # (using the Service's endpoint list), skipping an extra hop through the nodes.
-# HTTP only for now; HTTPS (ACM certificate + ExternalDNS) is the last step of Phase 3.
+# With ingress.host set: HTTPS (443) with the ACM certificate the controller
+# discovers for that hostname, HTTP (80) answers with a redirect to HTTPS, and
+# ExternalDNS points the hostname at this ALB.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -14,7 +16,13 @@ metadata:
     alb.ingress.kubernetes.io/load-balancer-name: {{ .Values.ingress.loadBalancerName | quote }}
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
+    {{- if .Values.ingress.host }}
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: {{ .Values.ingress.sslPolicy | quote }}
+    {{- else }}
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    {{- end }}
     alb.ingress.kubernetes.io/healthcheck-path: /ready
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
     alb.ingress.kubernetes.io/healthy-threshold-count: "2"
@@ -27,7 +35,10 @@ metadata:
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:
-    - http:
+    - {{- with .Values.ingress.host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
         paths:
           - path: /metrics
             pathType: Prefix
