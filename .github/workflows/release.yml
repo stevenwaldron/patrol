@@ -1,0 +1,119 @@
+# Release: when app code lands on main, build -> scan -> push the three images
+# (tagged with the commit), then open a pull request that changes image.tag in
+# the Patrol chart. Merging that PR is the deploy: Argo CD rolls it out (or the
+# next ./infra/up.sh does, if the cluster is down).
+#
+# AWS access: OIDC only (no stored keys). The role trusts pushes to main of this
+# repo and can do nothing but push to Patrol's 3 ECR repositories.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "config/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false   # never abandon a release halfway
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: arn:aws:iam::419701112481:role/patrol-github-actions
+  TRIVY_VERSION: v0.70.0
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write   # lets this job request the OIDC token; nothing else
+    strategy:
+      fail-fast: true   # one bad image stops the release; no partial deploys
+      matrix:
+        service: [scheduler, worker, status-page]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Image tag = commit (7 characters, same as ./app/push-images.sh)
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: app/Dockerfile
+          target: ${{ matrix.service }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: patrol/${{ matrix.service }}:${{ env.TAG }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+      - name: Trivy (fail on HIGH/CRITICAL that have a fix) BEFORE anything is pushed
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: patrol/${{ matrix.service }}:${{ env.TAG }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+      - name: AWS credentials via OIDC (about 1 hour)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: ECR login
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - name: Push (skip if this tag is already in ECR; tags are immutable)
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPO: patrol/${{ matrix.service }}
+        run: |
+          if aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "${REPO}:${TAG} already in ECR, skipping"
+            exit 0
+          fi
+          docker tag "${REPO}:${TAG}" "${REGISTRY}/${REPO}:${TAG}"
+          docker push --quiet "${REGISTRY}/${REPO}:${TAG}"
+          echo "### ${REPO}:${TAG} pushed" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-pr:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write         # push the deploy/<tag> branch
+      pull-requests: write    # open the PR (needs the repo setting described in docs/)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set image.tag in the Patrol chart
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          sed -i -E "s/^  tag: \".*\"/  tag: \"${TAG}\"/" deploy/charts/patrol/values.yaml
+          git diff --stat
+      - name: Open the deploy pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: deploy/images-${{ env.TAG }}
+          delete-branch: true
+          add-paths: deploy/charts/patrol/values.yaml
+          commit-message: "Deploy images ${{ env.TAG }}"
+          title: "Deploy images ${{ env.TAG }}"
+          body: |
+            Images for commit ${{ github.sha }} were built, passed the Trivy gate
+            (no fixable HIGH/CRITICAL findings) and were pushed to ECR as `${{ env.TAG }}`.
+
+            Merging this PR deploys them: Argo CD applies the new `image.tag`
+            (or the next `./infra/up.sh` does, if the cluster is down).
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -16,19 +16,21 @@
 #   Find the current digest:
 #     docker pull public.ecr.aws/docker/library/python:3.13-slim
 #     docker image inspect --format '{{index .RepoDigests 0}}' public.ecr.aws/docker/library/python:3.13-slim
-ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
+# Written as one literal FROM (not an ARG) so Dependabot can find and bump the
+# digest through a reviewed PR; both stages below build on this one line.
+FROM public.ecr.aws/docker/library/python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962 AS python
 
 # ---- Stage 1: install dependencies into a virtual environment ---------------
 # Only requirements.txt is copied first, so this slow layer is cached and
 # re-runs only when dependencies change, not on every code edit.
-FROM ${PYTHON_IMAGE} AS deps
+FROM python AS deps
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m venv /opt/venv
 COPY app/requirements.txt /tmp/requirements.txt
 RUN /opt/venv/bin/pip install -r /tmp/requirements.txt
 
 # ---- Stage 2: shared runtime (no pip cache, no build leftovers, no tests) ---
-FROM ${PYTHON_IMAGE} AS base
+FROM python AS base
 LABEL org.opencontainers.image.title="patrol" \
       org.opencontainers.image.description="Patrol uptime monitor" \
       org.opencontainers.image.licenses="MIT"

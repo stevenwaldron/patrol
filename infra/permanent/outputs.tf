@@ -57,3 +57,8 @@ output "certificate_status" {
   description = "PENDING_VALIDATION until the IONOS delegation has spread, then ISSUED."
   value       = aws_acm_certificate.main.status
 }
+
+output "github_actions_role_arn" {
+  description = "Role GitHub Actions assumes via OIDC (main branch only) to push images."
+  value       = aws_iam_role.github_actions.arn
+}

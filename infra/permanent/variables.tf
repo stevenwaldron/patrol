@@ -51,3 +51,38 @@ variable "domain_name" {
   type        = string
   default     = "mypatrolapp.cloud"
 }
+
+# --- GitHub Actions (OIDC) ---------------------------------------------------
+# Repos created after 2026-07-15 get GitHub's immutable OIDC subject format,
+# which includes the account's and repo's numeric IDs:
+#   repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main
+# IDs (not secret) come from: https://api.github.com/repos/<owner>/<repo>
+variable "github_owner" {
+  type    = string
+  default = "stevenwaldron"
+}
+
+variable "github_repo" {
+  type    = string
+  default = "patrol"
+}
+
+variable "github_owner_id" {
+  description = "Numeric GitHub account ID (owner.id from the GitHub API)."
+  type        = string
+  default     = "57245025"
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "Set github_owner_id to the numeric owner.id from https://api.github.com/repos/stevenwaldron/patrol."
+  }
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repository ID (id from the GitHub API)."
+  type        = string
+  default     = "1432869390"
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repo_id))
+    error_message = "Set github_repo_id to the numeric id from https://api.github.com/repos/stevenwaldron/patrol."
+  }
+}

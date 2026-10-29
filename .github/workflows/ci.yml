@@ -1,0 +1,145 @@
+# Checks on every pull request and every push to main. No AWS access here:
+# nothing in this workflow can change anything outside GitHub.
+#
+# Every third-party action is pinned to a full commit SHA, never a tag: in
+# March 2026 attackers rewrote 76 of trivy-action's 77 version tags to steal CI
+# secrets (GHSA-69fq-xp46-6x23). A commit SHA can't be moved. Dependabot keeps
+# the pins current through reviewed PRs.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HELM_VERSION: v4.3.1
+  KUBECONFORM_VERSION: v0.8.0
+  KUBERNETES_VERSION: 1.36.0
+  TERRAFORM_VERSION: 1.17.1
+  TRIVY_VERSION: v0.70.0
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: app/requirements*.txt
+      - run: pip install -r app/requirements-dev.txt
+      - name: pytest
+        working-directory: app
+        run: python -m pytest
+
+  chart:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Install kubeconform (checksum verified)
+        run: |
+          cd "$RUNNER_TEMP"
+          base="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}"
+          curl -fsSLO "${base}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSL "${base}/CHECKSUMS" | grep ' kubeconform-linux-amd64.tar.gz$' | sha256sum -c -
+          tar xzf kubeconform-linux-amd64.tar.gz kubeconform
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: helm lint
+        run: helm lint deploy/charts/patrol --namespace patrol
+      - name: Render (HTTPS and plain-HTTP modes) and validate against Kubernetes schemas
+        run: |
+          helm template patrol deploy/charts/patrol --namespace patrol > rendered-https.yaml
+          helm template patrol deploy/charts/patrol --namespace patrol --set ingress.host= > rendered-http.yaml
+          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" rendered-https.yaml rendered-http.yaml
+      - name: Guard rails still refuse bad input
+        # (Not "! helm ...": under bash -e a "!"-prefixed command never fails the step.)
+        run: |
+          if helm template patrol deploy/charts/patrol --namespace default >/dev/null 2>&1; then
+            echo "Chart rendered in the wrong namespace; the guard is broken" >&2; exit 1
+          fi
+          if helm template patrol deploy/charts/patrol --namespace patrol --set image.tag=latest >/dev/null 2>&1; then
+            echo "Chart accepted image.tag=latest; the schema guard is broken" >&2; exit 1
+          fi
+
+  shell:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: ShellCheck (preinstalled on GitHub's Ubuntu runners)
+        run: shellcheck --version && shellcheck app/*.sh infra/*.sh
+
+  terraform:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [infra/bootstrap, infra/permanent, infra/cluster]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: fmt
+        run: terraform fmt -check -recursive -diff
+        working-directory: ${{ matrix.dir }}
+      - name: validate (no backend, no AWS credentials)
+        working-directory: ${{ matrix.dir }}
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  images:
+    # Build every image and scan it, without pushing. Catches a failing build or
+    # a fixable HIGH/CRITICAL vulnerability before it reaches main.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [scheduler, worker, status-page]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: app/Dockerfile
+          target: ${{ matrix.service }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: patrol/${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+      - name: Trivy (fail on HIGH/CRITICAL that have a fix)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: patrol/${{ matrix.service }}:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table

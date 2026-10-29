@@ -342,6 +342,41 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
   - **`up.sh` final check rewritten:** waits for the Ingress address, then for the **ALB to report `active`**, then for ExternalDNS's record to point at **this** ALB, then asks **the zone's own AWS nameserver** for the IP and connects with `curl --resolve`. Success no longer depends on this laptop's DNS cache. A normal-DNS check is then printed for information ("your machine sees it too" / "hasn't caught up yet"). A genuine failure now says it's not a DNS cache issue and where to look.
   - Timing split in two: "Argo CD + apps healthy" (measured when the Patrol app is Healthy) and "load balancer + DNS + HTTPS check", so the numbers measure what they claim. `dig` added to the tool check.
   - ShellCheck clean; Terraform reference check clean.
+- SOA applied: plan exactly **1 to add, 0 to change, 0 to destroy**, record value `ns-852.awsdns-42.net. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 60` (screenshot 63); applied, and `dig SOA` against AWS's nameserver now ends in **60** (screenshot 64). Also visible: the `certificate_status` output caught up from `PENDING_VALIDATION` to `ISSUED` (Terraform's stored copy was stale until this refresh; the real certificate had been issued for hours).
+- Screenshot note: screenshot 64 shows full ARNs including the ACM certificate ID and the Slack secret's ARN suffix; not secrets, but crop to the last line for the write-up.
+- **✅ Clean bring-up, no false alarm (screenshot 65).** Every stage reported in order: controller → Patrol healthy; ALB `patrol-882290397…: active`; ExternalDNS pointed `mypatrolapp.cloud` at that ALB; HTTPS checked via AWS's nameserver `ns-852.awsdns-42.net`; `Status page: https://mypatrolapp.cloud/` "(this machine's DNS sees it too)". Honest timings now: **Argo CD + apps healthy 1m 42s after nodes Ready**; **load balancer + DNS + HTTPS check 1m 33s**; **everything up in 17m 20s** (the previous "11–12 min" figures were the false-alarm timeout, not Argo CD).
+- Closing teardown: 57 destroyed, cluster down in 13m 32s, every leftover check ok (screenshots 66a, 66). Zone check (screenshot 67) pending to formally close Phase 3.
+- Zone after the closing teardown: NS, SOA, ACM CNAME only (screenshot 67). Second automatic clean-up in a row.
+
+**Phase 3 complete.** Patrol runs in EKS, installed entirely from Git by Argo CD (app of apps: load balancer controller v3.6.2, ExternalDNS v0.23.0, Patrol chart 0.2.0), at **https://mypatrolapp.cloud** (ACM certificate, TLS 1.2/1.3, HTTP→HTTPS redirect, /metrics blocked at the ALB). Every pod uses its own Pod Identity role, locked to its namespace + ServiceAccount. One `up.sh` builds everything in ~17 minutes (Argo CD + apps healthy ~1m 42s after nodes Ready); one `down.sh` removes everything, including load balancers and DNS records, in ~13 minutes, with nothing left over. Bugs found and fixed along the way: readiness gates on first pods, zone spread mid-rollout, base-image drift (digest pin), teardown order (orphaned ALB risk), ExternalDNS apex ownership (upstream #4234), teardown DNS race, negative DNS caching false alarm.
+
+## Phase 4: CI/CD with GitHub Actions (planning)
+
+- Decision: **the deploy step opens a pull request** with the `image.tag` change, and I merge it. Rejected the bot committing straight to `main` (faster, true continuous delivery, but no human checkpoint before a release). Trade-off accepted: one extra click per release, in exchange for a reviewed, approved deploy record in GitHub's PR history.
+
+---
+
+## Phase 4: CI/CD with GitHub Actions
+
+**Plan approved.** Decision (mine): **the release bot opens a PR with the new image tag and I merge it** (a human approval gate before every deploy). Rejected the bot committing straight to `main` (true continuous delivery, but no review step). `main` left unprotected for now: PRs opened with GitHub's built-in token don't trigger workflows, so a "checks must pass" rule would block every deploy PR; revisit later.
+
+**`ci.yml`** (every PR + push to main, `contents: read` only, no AWS access): pytest (Python 3.13); Helm 4.3.1 lint + render in both HTTPS and HTTP modes + kubeconform strict against Kubernetes 1.36 (kubeconform downloaded with checksum check) + guard-rail checks (wrong namespace / `tag=latest` must be refused); ShellCheck; `terraform fmt -check` + `validate` (no backend, no credentials) for bootstrap, permanent and cluster; build all three images and scan with Trivy (no push).
+**`release.yml`** (push to main touching `app/**` or `config/**`, or manual): per image, build → **Trivy gate before anything is pushed** (HIGH/CRITICAL with a fix available, `--ignore-unfixed`, the rule set in Phase 3) → OIDC credentials → push to ECR as the 7-character commit (same as `push-images.sh`; skipped if the tag exists, since tags are immutable). Then `deploy-pr` sets `image.tag` and opens "Deploy images <tag>" via peter-evans/create-pull-request. `fail-fast` so one failing image stops the whole release (no partial deploys); `concurrency` so releases never overlap or get cancelled halfway. The deploy PR only changes `values.yaml`, which isn't in the release paths, so merging it can't trigger another release (no loop).
+
+**AWS access via OIDC** (`infra/permanent/github-oidc.tf`): GitHub OIDC provider + role `patrol-github-actions`, 1-hour sessions. Trust: `aud = sts.amazonaws.com` and **`sub` matched exactly** to `repo:stevenwaldron@<owner_id>/patrol@<repo_id>:ref:refs/heads/main`. Researched first: repos created after 2026-07-15 get GitHub's **immutable subject format** with numeric IDs (GitHub changelog 2026-04-23); the old `repo:owner/repo:...` pattern would silently never match. Exact match, no wildcards: a renamed or re-created repo gets new IDs and can't inherit the trust; PRs and other branches get nothing. Permissions: `ecr:GetAuthorizationToken` (can't be scoped) + push/read actions on the 3 Patrol repositories only. No cluster access (planning decision: CI gets no EKS access entry), no state access.
+
+**Supply chain:**
+- Every third-party action pinned to a **full commit SHA** with a version comment (checkout v7.0.1, setup-python v7.1.0, setup-helm v5.0.1, setup-terraform v4.0.1, setup-buildx v4.4.1, build-push v7.4.0, configure-aws-credentials v6.3.0, amazon-ecr-login v2.1.7, create-pull-request v8.1.1, trivy-action v0.36.0). Versions and SHAs read from each repo's tags with `git ls-remote`.
+- **Why it matters, found while choosing versions:** in **March 2026, 76 of trivy-action's 77 version tags were force-pushed to malicious commits that stole CI secrets** (GHSA-69fq-xp46-6x23). Verified before use: v0.36.0 (commit ed142fd, 2026-04-22) is a post-incident release on the official `master` branch, pins `setup-trivy` v0.2.6 by SHA (the advisory's safe version) and defaults to Trivy v0.70.0 (post-incident). Trivy version also pinned explicitly in the workflows.
+- `persist-credentials: false` on checkouts that never push; job-level permissions (`id-token: write` only on the publish job).
+- **Dependabot**: weekly grouped PRs for action SHAs, the Python base image digest and pip pins.
+- Decision: base image changed from `ARG PYTHON_IMAGE=…` to **one literal `FROM …@sha256:… AS python`** that both stages build on. Couldn't confirm Dependabot reads ARG-based FROM lines; a literal line removes the doubt. Same digest, same image; the ARG only existed for workspace testing.
+
+**Found while verifying (before anything ran):**
+- **Bug (mine):** the guard-rail step used `! helm template …`. Under bash `-e` (how GitHub runs steps) a `!`-prefixed command never fails the step, so the check could never fail. Rewritten as explicit `if … then exit 1`. Proven both ways locally (bad input refused, good input renders).
+- **Two existing files failed `terraform fmt -check`** (cluster `main.tf`, the VPC module's `main.tf`): alignment only. Would have turned CI red on its first run. Fixed with `terraform fmt` (whitespace only).
+- Verification: actionlint 1.7.12 (checksum verified, with ShellCheck on every `run:` block) clean; CI steps emulated locally (helm lint, 24/24 kubeconform-valid across both modes, guards, ShellCheck, 30 tests, the release `sed` changes exactly the tag line); Terraform 1.17.1 fmt clean. `terraform validate` couldn't run here (provider registry blocked); covered by the plan on my Mac and by CI.
+- Setup needed on GitHub: Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests" (needed for the deploy PR). Order matters: apply the OIDC Terraform **before** pushing the workflows, since the push itself triggers the first release.
 
 ---
 
@@ -349,6 +384,6 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 
 - [ ] **Hardening:** after first login, change the Argo CD admin password and delete `argocd-initial-admin-secret` (Argo CD's own install notes recommend it). Fits Phase 6 (security) or the Argo CD values.
 
-- [ ] **Phase 4:** Trivy with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`; record unfixed findings with triage notes. Consider Renovate/Dependabot for the base-image digest.
+- [x] **Phase 4:** Trivy gate (`HIGH,CRITICAL`, `--ignore-unfixed`, exit 1) and Dependabot for the base-image digest: built into ci.yml/release.yml/dependabot.yml.
 
 - [ ] **After Phase 5:** update the GitHub repo description to mention Argo CD, Helm, Prometheus, Grafana and Slack alerts (e.g. "…deployed with Argo CD and Helm, monitored with Prometheus, Grafana and Slack alerts"), and add the topics `argocd`, `helm`, `prometheus`, `grafana`.

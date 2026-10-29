@@ -22,7 +22,7 @@ module "vpc" {
   azs                   = var.azs
   public_subnet_cidrs   = var.public_subnet_cidrs
   private_subnet_cidrs  = var.private_subnet_cidrs
-  database_subnet_cidrs = [] # Patrol stores results in DynamoDB; no database tier
+  database_subnet_cidrs = []   # Patrol stores results in DynamoDB; no database tier
   single_nat_gateway    = true # one NAT (~$0.045/h) instead of one per zone; fine for a lab
 
   # How the AWS Load Balancer Controller finds subnets for load balancers.
