@@ -27,7 +27,11 @@ FROM python AS deps
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m venv /opt/venv
 COPY app/requirements.txt /tmp/requirements.txt
-RUN /opt/venv/bin/pip install -r /tmp/requirements.txt
+# pip is removed once the packages are in: the running services never install
+# anything, and pip bundles its own old copies of msgpack and setuptools that
+# image scanners (rightly) flag. No installer in the image = nothing to flag.
+RUN /opt/venv/bin/pip install -r /tmp/requirements.txt \
+ && /opt/venv/bin/python -m pip uninstall --yes pip
 
 # ---- Stage 2: shared runtime (no pip cache, no build leftovers, no tests) ---
 FROM python AS base
@@ -39,6 +43,10 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PROMETHEUS_DISABLE_CREATED_SERIES=True \
     PATROL_SITES_FILE=/app/config/sites.yaml
+# Remove the base image's own pip (and the installer wheels Python bundles for
+# "ensurepip") for the same reason: a runtime image has no use for an installer.
+RUN python -m pip uninstall --yes pip \
+ && rm -f /usr/local/lib/python3.*/ensurepip/_bundled/*.whl
 # A fixed, numeric, unprivileged user. Numeric matters: Kubernetes can only
 # verify "runAsNonRoot" when the image's USER is a number, not a name.
 RUN groupadd --system --gid 10001 patrol \

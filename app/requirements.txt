@@ -5,3 +5,7 @@ httpx==0.28.1
 prometheus-client==0.26.0
 PyYAML==6.0.3
 uvicorn==0.54.0
+# Not used directly: botocore's HTTP library. Pinned above botocore's minimum to
+# fix CVE-2026-97687 and CVE-2026-97689 (both HIGH, fixed in 2.8.0; found by the
+# CI Trivy gate). botocore allows urllib3 >=1.25.4,<3,!=2.2.0.
+urllib3==2.8.0

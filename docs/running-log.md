@@ -377,10 +377,25 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 - **Two existing files failed `terraform fmt -check`** (cluster `main.tf`, the VPC module's `main.tf`): alignment only. Would have turned CI red on its first run. Fixed with `terraform fmt` (whitespace only).
 - Verification: actionlint 1.7.12 (checksum verified, with ShellCheck on every `run:` block) clean; CI steps emulated locally (helm lint, 24/24 kubeconform-valid across both modes, guards, ShellCheck, 30 tests, the release `sed` changes exactly the tag line); Terraform 1.17.1 fmt clean. `terraform validate` couldn't run here (provider registry blocked); covered by the plan on my Mac and by CI.
 - Setup needed on GitHub: Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests" (needed for the deploy PR). Order matters: apply the OIDC Terraform **before** pushing the workflows, since the push itself triggers the first release.
+- OIDC Terraform: plan exactly **3 to add** (provider, role, inline ECR policy scoped to the 3 repository ARNs) and applied (screenshots 68, 68b).
+- **First push results (screenshot 70b):** ci #1 and release #1 (24 s) on commit `039a1b1` **failed**. Dependabot started immediately: github_actions and pip update jobs succeeded and opened PR #1 ("Bump the python group in /app with 2 updates"); the two **docker** update jobs failed. On PR #1's CI run (screenshot 70a), python-tests, chart, shell and all three terraform jobs (fmt + validate, the first real validate) **passed**; only the three **images** jobs failed. Gathering the failing steps' logs before diagnosing.
+- **The Trivy gate's first catch (CI images jobs + release #1).** Build passed; Trivy (installed fine at the safe pinned version) found 5 fixable HIGH findings (log saved as 70d):
+  - `msgpack` 1.1.2: CVE-2026-114613, GHSA-6v7p-g79w-8964 (fixed 1.2.1/1.2.3)
+  - `setuptools` 70.3.0: CVE-2025-47273 (fixed 78.1.1)
+  - `urllib3` 2.7.0: CVE-2026-97687, CVE-2026-97689 (fixed 2.8.0)
+  - **Traced before fixing:** Patrol's requirements list neither msgpack nor setuptools. They are **pip's own vendored copies** (pip's `vendor.txt`: `msgpack==1.1.2`, `setuptools==70.3.0` in pip 25.3, 26.0 and the latest 26.2.2), so upgrading pip changes nothing. urllib3 is real: boto3 → botocore → urllib3, on every AWS call.
+  - Decision: **remove pip from the runtime images** (from the venv after installing, and the base image's pip plus the `ensurepip` bundled wheels). The services never install anything at runtime; smaller image, one less tool for an attacker; the findings are genuinely gone rather than hidden. Rejected: a `.trivyignore` entry (hides the findings; the vulnerable code would still ship) and upgrading pip (no effect).
+  - Decision: **pin `urllib3==2.8.0`** (transitive dependency, pinned explicitly with a comment naming the CVEs). Checked botocore's allowed range (`>=1.25.4,<3,!=2.2.0`).
+  - Verified by rehearsing the Dockerfile steps in a Python 3.13 venv: pip uninstalled ("No module named pip"), no msgpack/setuptools left, urllib3 2.8.0, all service imports load; 30 tests pass with urllib3 2.8.0. CI's Trivy is the final proof.
+  - **Surprise:** the rehearsal resolved `botocore` to 1.43.123: boto3's own pin only constrains botocore to a range, so "pinned" requirements still float on transitive packages. A lock file (e.g. `pip-compile --generate-hashes`) would make builds fully repeatable; noted for later.
+  - Lesson: the gate did exactly its job on its first run: it blocked an image with fixable HIGH vulnerabilities before anything reached ECR.
+- Dependabot's **docker** update jobs failed on first run; logs not yet read (next).
 
 ---
 
 ## Reminders (open items)
+
+- [ ] **Repeatable builds:** consider a hashed lock file for transitive Python dependencies (botocore floated from 1.43.115 to 1.43.123 under the same requirements).
 
 - [ ] **Hardening:** after first login, change the Argo CD admin password and delete `argocd-initial-admin-secret` (Argo CD's own install notes recommend it). Fits Phase 6 (security) or the Argo CD values.
 
