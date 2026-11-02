@@ -1,0 +1,136 @@
+# Unit tests for Patrol's alert and SLO rules: fake metric histories in, exact
+# alerts (or none) out.   promtool test rules deploy/monitoring/tests/patrol-rules.test.yaml
+rule_files:
+  - ../../charts/patrol/files/prometheus-rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # 1. A real site that goes down alerts after 3 minutes, not before.
+  - interval: 1m
+    input_series:
+      - series: 'patrol_site_up{site="chess", pod="status-page-a"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+      - series: 'patrol_site_up{site="chess", pod="status-page-b"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m          # down since 2m: only 2 minutes so far
+        alertname: PatrolSiteDown
+        exp_alerts: []
+      - eval_time: 6m          # down for 4 minutes (> 3m)
+        alertname: PatrolSiteDown
+        exp_alerts:
+          - exp_labels: { severity: warning, site: chess }
+            exp_annotations:
+              summary: Monitored site chess is down.
+              description: Patrol checks have failed for chess for at least 3 minutes.
+
+  # 2. One replica seeing the site down is enough (min across replicas).
+  - interval: 1m
+    input_series:
+      - series: 'patrol_site_up{site="cloudforger", pod="status-page-a"}'
+        values: '0x8'
+      - series: 'patrol_site_up{site="cloudforger", pod="status-page-b"}'
+        values: '1x8'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PatrolSiteDown
+        exp_alerts:
+          - exp_labels: { severity: warning, site: cloudforger }
+            exp_annotations:
+              summary: Monitored site cloudforger is down.
+              description: Patrol checks have failed for cloudforger for at least 3 minutes.
+
+  # 3. broken-test is down on purpose and must NEVER alert (decision A).
+  - interval: 1m
+    input_series:
+      - series: 'patrol_site_up{site="broken-test", pod="status-page-a"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PatrolSiteDown
+        exp_alerts: []
+
+  # 4. Stale checks: the freshness ratio, then the 5-minute stale alert.
+  #    cloudforger is fresh (60 s); chess stops being checked (age grows +60 s/min).
+  - interval: 1m
+    input_series:
+      - series: 'patrol_site_last_checked_age_seconds{site="cloudforger", pod="status-page-a"}'
+        values: '60x20'
+      - series: 'patrol_site_last_checked_age_seconds{site="chess", pod="status-page-a"}'
+        values: '60+60x20'      # 60, 120, ..., 1260
+    promql_expr_test:
+      - expr: patrol:checks_stale:ratio
+        eval_time: 1m          # chess 120 s old: both fresh
+        exp_samples:
+          - labels: 'patrol:checks_stale:ratio'
+            value: 0
+      - expr: patrol:checks_stale:ratio
+        eval_time: 3m          # chess 240 s old (> 180): 1 of 2 sites stale
+        exp_samples:
+          - labels: 'patrol:checks_stale:ratio'
+            value: 0.5
+    alert_rule_test:
+      # chess passes 300 s at 5m (360 s). Checkpoints stay at least one
+      # evaluation away from the exact 5-minute "for" boundary: the alert reads a
+      # recording rule from ANOTHER group, and groups evaluate independently, so
+      # it can see that value up to 30 s late (a boundary check is a coin toss).
+      - eval_time: 8m          # stale for 3 minutes: not yet
+        alertname: PatrolChecksStale
+        exp_alerts: []
+      - eval_time: 12m         # stale for 7 minutes: firing
+        alertname: PatrolChecksStale
+        exp_alerts:
+          - exp_labels: { severity: critical, site: chess }
+            exp_annotations:
+              summary: No fresh check for chess in over 5 minutes.
+              description: The scheduler or the workers have stopped working (latest check is 13m 0s old).
+
+  # 5. Status page error budget: 20% of requests failing burns budget 40x too fast.
+  - interval: 1m
+    input_series:
+      - series: 'patrol_http_requests_total{path="/", code="200"}'
+        values: '0+80x120'
+      - series: 'patrol_http_requests_total{path="/", code="500"}'
+        values: '0+20x120'
+    alert_rule_test:
+      - eval_time: 2m          # condition true since ~1m (first rate); the 2m "for" hasn't passed yet
+        alertname: PatrolStatusPageErrorBudgetFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PatrolStatusPageErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels: { severity: critical, slo: status-page-availability }
+            exp_annotations:
+              summary: Status page is failing requests fast enough to exhaust a 30-day error budget in about 2 days.
+              description: 5xx ratio over 1h is 20% (SLO allows 0.5%).
+
+  # 6. A healthy status page (no 5xx) never burns budget.
+  - interval: 1m
+    input_series:
+      - series: 'patrol_http_requests_total{path="/", code="200"}'
+        values: '0+100x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: PatrolStatusPageErrorBudgetFastBurn
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: PatrolStatusPageErrorBudgetSlowBurn
+        exp_alerts: []
+
+  # 7. If no status page pod can be scraped, alert on the missing data itself.
+  - interval: 1m
+    input_series:
+      - series: 'up{namespace="patrol", job="status-page", pod="status-page-a"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PatrolStatusPageMetricsMissing
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: PatrolStatusPageMetricsMissing
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: Prometheus cannot scrape any status page pod.
+              description: Patrol's SLO and site alerts are blind until the status page is back.

@@ -1,0 +1,142 @@
+# Patrol's recording rules, SLOs and alerts. Plain Prometheus rule format: the
+# chart wraps this file in a PrometheusRule, and CI runs `promtool check rules`
+# and the unit tests in deploy/monitoring/tests/ against this exact file.
+#
+# SLO 1, status page availability: 99.5% of real visitor requests succeed
+#   (no 5xx). Probes and /metrics are already excluded in the app's metrics.
+# SLO 2, check freshness: 99% of the time, every site's latest check is under
+#   3 minutes old. 3 min, not 2: scheduler interval (60 s) + status page cache
+#   (30 s) + slowest check (10 s) + scrape interval (30 s) already reach ~130 s
+#   on a perfectly healthy system; 2 min would burn budget for nothing.
+#
+# Alerts follow the multi-window, multi-burn-rate method (Google SRE workbook):
+# page when the error budget burns 14.4x too fast (1h AND 5m windows agree),
+# ticket at 6x (6h AND 30m). Two windows = fast to fire, quick to recover, and
+# no alert on a single blip.
+#
+# The site gauges come from every status-page replica; min by (site) collapses
+# the copies (they read the same DynamoDB data; min of "up" = any replica sees
+# it down, min of "age" = the freshest view, ignoring one replica's 30 s cache).
+groups:
+  - name: patrol-sli.rules
+    interval: 30s
+    rules:
+      # --- SLO 1: status page availability ------------------------------------
+      - record: patrol:status_page_errors:ratio_rate5m
+        expr: |
+          sum(rate(patrol_http_requests_total{code=~"5.."}[5m]))
+          / sum(rate(patrol_http_requests_total[5m]))
+      - record: patrol:status_page_errors:ratio_rate30m
+        expr: |
+          sum(rate(patrol_http_requests_total{code=~"5.."}[30m]))
+          / sum(rate(patrol_http_requests_total[30m]))
+      - record: patrol:status_page_errors:ratio_rate1h
+        expr: |
+          sum(rate(patrol_http_requests_total{code=~"5.."}[1h]))
+          / sum(rate(patrol_http_requests_total[1h]))
+      - record: patrol:status_page_errors:ratio_rate6h
+        expr: |
+          sum(rate(patrol_http_requests_total{code=~"5.."}[6h]))
+          / sum(rate(patrol_http_requests_total[6h]))
+
+      # --- SLO 2: check freshness ---------------------------------------------
+      - record: patrol:site_check_age_seconds:min
+        expr: min by (site) (patrol_site_last_checked_age_seconds)
+      # Share of sites whose latest check is stale right now (0 = all fresh).
+      - record: patrol:checks_stale:ratio
+        expr: |
+          (count(patrol:site_check_age_seconds:min > 180) or vector(0))
+          / count(patrol:site_check_age_seconds:min)
+      - record: patrol:checks_stale:ratio_avg5m
+        expr: avg_over_time(patrol:checks_stale:ratio[5m])
+      - record: patrol:checks_stale:ratio_avg30m
+        expr: avg_over_time(patrol:checks_stale:ratio[30m])
+      - record: patrol:checks_stale:ratio_avg1h
+        expr: avg_over_time(patrol:checks_stale:ratio[1h])
+      - record: patrol:checks_stale:ratio_avg6h
+        expr: avg_over_time(patrol:checks_stale:ratio[6h])
+
+  - name: patrol-slo.alerts
+    rules:
+      - alert: PatrolStatusPageErrorBudgetFastBurn
+        expr: |
+          patrol:status_page_errors:ratio_rate1h > (14.4 * 0.005)
+          and patrol:status_page_errors:ratio_rate5m > (14.4 * 0.005)
+        for: 2m
+        labels: { severity: critical, slo: status-page-availability }
+        annotations:
+          summary: Status page is failing requests fast enough to exhaust a 30-day error budget in about 2 days.
+          description: '5xx ratio over 1h is {{ $value | humanizePercentage }} (SLO allows 0.5%).'
+      - alert: PatrolStatusPageErrorBudgetSlowBurn
+        expr: |
+          patrol:status_page_errors:ratio_rate6h > (6 * 0.005)
+          and patrol:status_page_errors:ratio_rate30m > (6 * 0.005)
+        for: 15m
+        labels: { severity: warning, slo: status-page-availability }
+        annotations:
+          summary: Status page errors are steadily eating the error budget.
+          description: '5xx ratio over 6h is {{ $value | humanizePercentage }} (SLO allows 0.5%).'
+      - alert: PatrolCheckFreshnessFastBurn
+        expr: |
+          patrol:checks_stale:ratio_avg1h > (14.4 * 0.01)
+          and patrol:checks_stale:ratio_avg5m > (14.4 * 0.01)
+        for: 2m
+        labels: { severity: critical, slo: check-freshness }
+        annotations:
+          summary: Sites are not being checked on time; the freshness error budget is burning fast.
+          description: 'Stale share over 1h is {{ $value | humanizePercentage }} (SLO allows 1%).'
+      - alert: PatrolCheckFreshnessSlowBurn
+        expr: |
+          patrol:checks_stale:ratio_avg6h > (6 * 0.01)
+          and patrol:checks_stale:ratio_avg30m > (6 * 0.01)
+        for: 15m
+        labels: { severity: warning, slo: check-freshness }
+        annotations:
+          summary: Checks are regularly running late.
+          description: 'Stale share over 6h is {{ $value | humanizePercentage }} (SLO allows 1%).'
+
+  - name: patrol.alerts
+    rules:
+      # The product's job: tell someone when a monitored site goes down.
+      # broken-test is down ON PURPOSE (it demos the status page), so it never
+      # alerts: an always-firing alert teaches people to ignore alerts.
+      - alert: PatrolSiteDown
+        expr: min by (site) (patrol_site_up{site!="broken-test"}) == 0
+        for: 3m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Monitored site {{ $labels.site }} is down.'
+          description: 'Patrol checks have failed for {{ $labels.site }} for at least 3 minutes.'
+      # Reads the raw metric, not the patrol:site_check_age_seconds:min recording
+      # rule: rule groups evaluate independently, so an alert built on another
+      # group's recording rule sees it up to one interval (30 s) late. Found by
+      # the unit tests flaking 9 times in 40 runs.
+      - alert: PatrolChecksStale
+        expr: min by (site) (patrol_site_last_checked_age_seconds) > 300
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: 'No fresh check for {{ $labels.site }} in over 5 minutes.'
+          description: 'The scheduler or the workers have stopped working (latest check is {{ $value | humanizeDuration }} old).'
+      - alert: PatrolWorkerErrors
+        expr: sum by (stage) (rate(patrol_worker_errors_total[10m])) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Workers keep failing at the {{ $labels.stage }} stage.'
+          description: 'Worker errors have been recorded continuously for 10 minutes.'
+      - alert: PatrolSchedulerJobFailed
+        expr: kube_job_status_failed{namespace="patrol", job_name=~"scheduler-.+"} > 0
+        labels: { severity: warning }
+        annotations:
+          summary: 'A scheduler run failed ({{ $labels.job_name }}).'
+          description: 'Check its logs: kubectl -n patrol logs job/{{ $labels.job_name }}'
+      # Alerting on missing data: if the status page disappears, every rule above
+      # that depends on its metrics silently stops evaluating. This catches that.
+      - alert: PatrolStatusPageMetricsMissing
+        expr: absent(up{namespace="patrol", job="status-page"} == 1)
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: Prometheus cannot scrape any status page pod.
+          description: Patrol's SLO and site alerts are blind until the status page is back.

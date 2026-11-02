@@ -70,3 +70,8 @@ ingress:
   sslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
   # ALB waits this long for in-flight requests when a pod leaves (AWS default is 300 s).
   deregistrationDelaySeconds: 30
+
+monitoring:
+  # ServiceMonitors, alert rules and dashboards (needs kube-prometheus-stack).
+  enabled: true
+  scrapeInterval: 30s

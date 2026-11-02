@@ -25,6 +25,12 @@ env:
   KUBERNETES_VERSION: 1.36.0
   TERRAFORM_VERSION: 1.17.1
   TRIVY_VERSION: v0.70.0
+  PROMETHEUS_VERSION: 3.15.1
+  ALERTMANAGER_VERSION: 0.34.2      # same as the cluster runs (kube-prometheus-stack 92.17.0)
+  KPS_CHART_VERSION: 92.17.0
+  # Schemas for custom resources (ServiceMonitor, PrometheusRule, ExternalSecret,
+  # Argo CD Application...), so they get the same strict check as built-in ones.
+  CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
 
 jobs:
   python-tests:
@@ -66,7 +72,14 @@ jobs:
         run: |
           helm template patrol deploy/charts/patrol --namespace patrol > rendered-https.yaml
           helm template patrol deploy/charts/patrol --namespace patrol --set ingress.host= > rendered-http.yaml
-          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" rendered-https.yaml rendered-http.yaml
+          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+            -schema-location default -schema-location "$CRD_SCHEMAS" \
+            rendered-https.yaml rendered-http.yaml
+      - name: Validate platform manifests (secrets, Argo CD apps)
+        run: |
+          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+            -schema-location default -schema-location "$CRD_SCHEMAS" \
+            deploy/platform deploy/argocd/root-app.yaml deploy/argocd/apps
       - name: Guard rails still refuse bad input
         # (Not "! helm ...": under bash -e a "!"-prefixed command never fails the step.)
         run: |
@@ -76,6 +89,67 @@ jobs:
           if helm template patrol deploy/charts/patrol --namespace patrol --set image.tag=latest >/dev/null 2>&1; then
             echo "Chart accepted image.tag=latest; the schema guard is broken" >&2; exit 1
           fi
+
+  monitoring:
+    # Patrol's alert rules are tested like code: syntax, unit tests (fake metric
+    # histories in, exact alerts out), and the Alertmanager config the cluster
+    # will actually run, rendered from the real chart and checked with amtool.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Install promtool and amtool (checksums verified)
+        run: |
+          cd "$RUNNER_TEMP"
+          p="prometheus-${PROMETHEUS_VERSION}.linux-amd64"
+          curl -fsSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${p}.tar.gz"
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/sha256sums.txt" | grep " ${p}.tar.gz$" | sha256sum -c -
+          tar xzf "${p}.tar.gz" --strip-components=1 "${p}/promtool"
+          a="alertmanager-${ALERTMANAGER_VERSION}.linux-amd64"
+          curl -fsSLO "https://github.com/prometheus/alertmanager/releases/download/v${ALERTMANAGER_VERSION}/${a}.tar.gz"
+          curl -fsSL "https://github.com/prometheus/alertmanager/releases/download/v${ALERTMANAGER_VERSION}/sha256sums.txt" | grep " ${a}.tar.gz$" | sha256sum -c -
+          tar xzf "${a}.tar.gz" --strip-components=1 "${a}/amtool"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Rules syntax
+        run: promtool check rules deploy/charts/patrol/files/prometheus-rules.yaml
+      - name: Rules unit tests
+        run: promtool test rules deploy/monitoring/tests/patrol-rules.test.yaml
+      - name: Dashboards are generated from their source
+        run: |
+          python3 deploy/monitoring/dashboards-src/build_dashboards.py
+          git diff --exit-code -- deploy/charts/patrol/files/dashboards \
+            || { echo "Dashboards out of date: run build_dashboards.py and commit the JSON" >&2; exit 1; }
+      - name: Alertmanager config (rendered from the real chart) + routing
+        run: |
+          helm template kps kube-prometheus-stack --repo https://prometheus-community.github.io/helm-charts \
+            --version "$KPS_CHART_VERSION" --namespace monitoring \
+            -f deploy/monitoring/kube-prometheus-stack-values.yaml > kps.yaml
+          python3 - <<'PY'
+          import base64, yaml
+          docs = [d for d in yaml.safe_load_all(open("kps.yaml")) if d]
+          sec = next(d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-alertmanager"))
+          cfg = base64.b64decode(sec["data"]["alertmanager.yaml"]).decode()
+          # The webhook file only exists in the cluster; point at a stand-in here.
+          cfg = cfg.replace("/etc/alertmanager/secrets/", "/tmp/am-secrets/")
+          open("am.yaml", "w").write(cfg)
+          PY
+          mkdir -p /tmp/am-secrets/alertmanager-slack
+          echo "https://hooks.slack.com/services/T0/B0/x" > /tmp/am-secrets/alertmanager-slack/slack-webhook-url
+          amtool check-config am.yaml
+          expect() {  # expect RECEIVER label=value...
+            want=$1; shift
+            got=$(amtool config routes test --config.file=am.yaml "$@")
+            echo "$* -> $got"
+            [ "$got" = "$want" ] || { echo "expected $want" >&2; exit 1; }
+          }
+          expect slack alertname=PatrolSiteDown severity=warning site=chess
+          expect slack alertname=PatrolChecksStale severity=critical site=chess
+          expect null  alertname=Watchdog severity=none
+          expect null  alertname=CPUThrottlingHigh severity=info
 
   shell:
     runs-on: ubuntu-24.04

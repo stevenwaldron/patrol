@@ -1,0 +1,120 @@
+# kube-prometheus-stack 92.17.0 (Prometheus Operator v0.94.2): Prometheus,
+# Alertmanager, Grafana, kube-state-metrics, node-exporter.
+# Used by deploy/argocd/apps/kube-prometheus-stack.yaml (and rendered in CI).
+
+# ---- Parts of Kubernetes that AWS runs for us (EKS control plane) -----------
+# Not reachable from inside the cluster on EKS: scraping them only produces
+# "target down" false alarms. Their rules go too.
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeEtcd: { enabled: false }
+kubeProxy: { enabled: false }     # EKS kube-proxy serves metrics on 127.0.0.1 only
+windowsMonitoring: { enabled: false }
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+    windows: false
+
+prometheusOperator:
+  # The validating webhook needs certificate-patching hook Jobs that fight with
+  # Argo CD's sync. Patrol's rules are validated in CI with promtool instead
+  # (syntax + unit tests), before they ever reach the cluster.
+  admissionWebhooks: { enabled: false }
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { memory: 192Mi }
+
+prometheus:
+  prometheusSpec:
+    # Metrics live in the cluster and go with it at teardown (no disk). In
+    # production: remote storage or a managed service.
+    retention: 1d
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    # Pick up ServiceMonitors and PrometheusRules from ANY namespace and with any
+    # labels (the default only selects ones labelled for this Helm release).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 150m, memory: 400Mi }
+      limits: { memory: 1Gi }
+
+alertmanager:
+  alertmanagerSpec:
+    # Mounted at /etc/alertmanager/secrets/alertmanager-slack/ (created by ESO).
+    secrets: [alertmanager-slack]
+    resources:
+      requests: { cpu: 10m, memory: 48Mi }
+      limits: { memory: 128Mi }
+  config:
+    global:
+      resolve_timeout: 5m
+    inhibit_rules:
+      # A critical alert silences the warning version of the same alert.
+      - source_matchers: ['severity = critical']
+        target_matchers: ['severity = warning']
+        equal: ['namespace', 'alertname']
+    route:
+      receiver: slack
+      group_by: ['alertname', 'namespace', 'site']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # Watchdog always fires on purpose (a "dead man's switch" for the
+        # pipeline itself); InfoInhibitor and info-level alerts are not worth a
+        # Slack message.
+        - receiver: 'null'
+          matchers: ['alertname =~ "Watchdog|InfoInhibitor"']
+        - receiver: 'null'
+          matchers: ['severity = "info"']
+    receivers:
+      - name: 'null'
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/slack-webhook-url
+            send_resolved: true
+            title: '{{ if eq .Status "firing" }}🔴{{ else }}✅{{ end }} {{ .CommonLabels.alertname }}{{ with .CommonLabels.site }} ({{ . }}){{ end }}'
+            text: |-
+              {{ range .Alerts }}*{{ .Labels.severity | toUpper }}* {{ .Annotations.summary }}
+              {{ with .Annotations.description }}{{ . }}{{ end }}
+              {{ end }}
+    templates: ['/etc/alertmanager/config/*.tmpl']
+
+grafana:
+  admin:
+    existingSecret: grafana-admin   # generated in-cluster by ESO (platform-secrets)
+    userKey: admin-user
+    passwordKey: admin-password
+  service:
+    type: ClusterIP                 # private: kubectl port-forward only
+  persistence: { enabled: false }
+  defaultDashboardsEnabled: true    # the standard Kubernetes dashboards
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard      # Patrol's dashboards ship in its Helm chart
+      labelValue: "1"
+      searchNamespace: ALL
+  grafana.ini:
+    analytics: { check_for_updates: false, reporting_enabled: false }
+    users: { allow_sign_up: false }
+  resources:
+    requests: { cpu: 50m, memory: 160Mi }
+    limits: { memory: 384Mi }
+
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits: { memory: 128Mi }
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 24Mi }
+    limits: { memory: 64Mi }

@@ -38,6 +38,11 @@ locals {
       service_account = "external-dns"
       description     = "ExternalDNS: point Patrol's domain at the current ALB"
     }
+    external-secrets = {
+      namespace       = "external-secrets"
+      service_account = "external-secrets"
+      description     = "External Secrets Operator: read the Slack webhook for Alertmanager"
+    }
   }
 
   # Least privilege: each workload gets exactly the actions its code calls.
@@ -103,6 +108,24 @@ locals {
           Resource = "*"
         }
       ]
+    })
+
+    # From the ESO "EKS Pod Identity" guide, narrowed from Resource "*" to the one
+    # secret Patrol needs. (Secrets Manager ARNs end in a random suffix; the
+    # Terraform-known ARN includes it, so no wildcard is needed.)
+    external-secrets = jsonencode({
+      Version = "2012-10-17"
+      Statement = [{
+        Sid    = "ReadSlackWebhookOnly"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:GetResourcePolicy",
+          "secretsmanager:ListSecretVersionIds",
+        ]
+        Resource = aws_secretsmanager_secret.slack_webhook.arn
+      }]
     })
 
     # Official policy published with the controller, pinned to the controller

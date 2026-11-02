@@ -1,0 +1,51 @@
+{{- if .Values.monitoring.enabled }}
+{{- /*
+Monitoring for Patrol (needs kube-prometheus-stack's CRDs: wave -1 installs them
+before this chart, wave 0).
+- ServiceMonitors: tell Prometheus to scrape the worker and status page /metrics
+  (inside the cluster only; the ALB blocks /metrics from the internet).
+- PrometheusRule: SLOs, burn-rate alerts, site/staleness alerts. Source of truth is
+  files/prometheus-rules.yaml (unit-tested in CI with promtool).
+- Dashboards: ConfigMaps labelled for Grafana's sidecar, from files/dashboards/.
+*/}}
+{{- range $component := list "status-page" "worker" }}
+{{- $c := dict "root" $ "component" $component }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $component }}
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "patrol.selectorLabels" $c | nindent 6 }}
+  endpoints:
+    - port: {{ ternary "http" "metrics" (eq $component "status-page") }}
+      path: /metrics
+      interval: {{ $.Values.monitoring.scrapeInterval }}
+{{- end }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: patrol
+  labels:
+    {{- include "patrol.labels" (dict "root" . "component" "monitoring") | nindent 4 }}
+spec:
+  {{- .Files.Get "files/prometheus-rules.yaml" | nindent 2 }}
+{{- range $path, $_ := .Files.Glob "files/dashboards/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-{{ base $path | trimSuffix ".json" }}
+  labels:
+    {{- include "patrol.labels" (dict "root" $ "component" "monitoring") | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  {{ base $path }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}
+{{- end }}

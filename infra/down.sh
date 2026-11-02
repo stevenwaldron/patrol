@@ -113,8 +113,20 @@ if kubectl --context "$CLUSTER" get namespaces >/dev/null 2>&1; then
   wait_for_load_balancers_gone
   wait_for_dns_records_gone
   if kubectl --context "$CLUSTER" get crd applications.argoproj.io >/dev/null 2>&1; then
-    echo "==> Deleting the remaining Argo CD apps (load balancer controller, ExternalDNS)"
-    argo delete applications.argoproj.io --all --wait=true --timeout=5m || true
+    # Reverse install order (highest sync wave first): an app is removed while the
+    # apps it depends on still run. E.g. platform-secrets (wave -1) goes before
+    # External Secrets (wave -2), so ESO's CRDs aren't deleted out from under
+    # ExternalSecrets that still exist.
+    echo "==> Deleting the remaining Argo CD apps, last-installed first"
+    argo get applications.argoproj.io \
+      -o jsonpath='{range .items[*]}{.metadata.annotations.argocd\.argoproj\.io/sync-wave}{" "}{.metadata.name}{"\n"}{end}' |
+      awk '{ if (NF == 1) print 0, $1; else print }' | sort -k1,1nr |
+      while read -r wave app; do
+        if [[ -n "$app" ]]; then
+          echo "    wave ${wave}: ${app}"
+          argo delete applications.argoproj.io "$app" --wait=true --timeout=5m || true
+        fi
+      done
   fi
 else
   echo "==> Cluster API not reachable (already gone, or your IP changed). Skipping Kubernetes cleanup."

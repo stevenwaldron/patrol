@@ -1,0 +1,37 @@
+# Monitoring: Prometheus, Alertmanager (to Slack), Grafana (private).
+# Two sources: the community chart, plus this repo for its values file, so the
+# settings are reviewed in Git and CI renders exactly what Argo CD deploys.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    # Wave -1: its CRDs (ServiceMonitor, PrometheusRule) must exist before
+    # Patrol's chart (wave 0) uses them.
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: default
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 92.17.0
+      helm:
+        releaseName: kps
+        valueFiles:
+          - $values/deploy/monitoring/kube-prometheus-stack-values.yaml
+    - repoURL: https://github.com/stevenwaldron/patrol.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # the operator's CRDs exceed client-side apply's size limit

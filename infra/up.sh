@@ -187,4 +187,10 @@ Argo CD dashboard (private: only through your own machine):
   then open https://localhost:8080  (a self-signed certificate warning is expected)
   User: admin. Password (copy it, never screenshot it):
   kubectl --context $CLUSTER -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+
+Grafana (private: only through your own machine):
+  kubectl --context $CLUSTER -n monitoring port-forward svc/kps-grafana 3000:80
+  then open http://localhost:3000   (dashboards: Patrol: overview, Patrol: SLOs and error budgets)
+  User: admin. Password (generated in-cluster each rebuild; copy it, never screenshot it):
+  kubectl --context $CLUSTER -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
 EOF
