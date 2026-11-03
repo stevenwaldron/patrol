@@ -24,6 +24,12 @@ prometheusOperator:
   # Argo CD's sync. Patrol's rules are validated in CI with promtool instead
   # (syntax + unit tests), before they ever reach the cluster.
   admissionWebhooks: { enabled: false }
+  # The operator's HTTPS certificate normally comes from that webhook's Secret
+  # (kps-kube-prometheus-stack-admission). With the webhook off nothing creates
+  # it, and the operator pod waits forever to mount it (found live: stuck in
+  # ContainerCreating). Its port only serves the webhook and its own metrics,
+  # inside the cluster, so plain HTTP.
+  tls: { enabled: false }
   resources:
     requests: { cpu: 50m, memory: 96Mi }
     limits: { memory: 192Mi }

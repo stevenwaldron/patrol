@@ -441,10 +441,22 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 
 **CI:** new `monitoring` job: promtool + amtool installed with checksum checks; rules syntax; rule unit tests; dashboards regenerated and `git diff --exit-code`; kube-prometheus-stack rendered from the real chart with our values → Alertmanager config checked with amtool → routing assertions. Chart and platform manifests now validated **with CRD schemas** (datreeio CRDs catalog). **Found while doing this:** the existing chart job would have turned red the moment the chart contained a ServiceMonitor (plain kubeconform has no schema for it). All new steps run locally first; actionlint clean.
 
+**Push rejected (non-fast-forward), harmless.** *Symptom:* `git push` of the Phase 5 commit was rejected: "the tip of your current branch is behind". *Cause:* the release bot's deploy PR #2 (`image.tag` → 808598b) had been merged **on GitHub**, and the Mac had never pulled it. Checked what was on GitHub before combining (`git log main..origin/main`, `git diff --stat`): one file, the same tag change our commit already carried, so `git pull --rebase` combined them cleanly. *Lesson:* with a bot that commits to `main`, `git pull` before starting work, not just before pushing.
+
 **down.sh:** the final step now deletes the remaining apps **in reverse sync-wave order** (wave −1 apps, then ESO in wave −2), so ESO's CRDs aren't removed while ExternalSecrets still exist. Verified with stand-in commands.
 
 - Trade-off (accepted, documented): Alertmanager can't start until ESO has created `alertmanager-slack`. If the Slack secret can't be read (e.g. an IAM mistake), wave −1 never turns healthy and Patrol (wave 0) waits. That's loud rather than silent (up.sh prints each app's state), and fixing a broken alert path before deploying is arguably right.
 - Capacity estimate: monitoring requests ≈ 0.9 GB memory; total ≈ 2.5 GB of ~6.8 GB on two t3.medium nodes. To measure live.
+
+**Bug (first live run): the monitoring stack never became healthy, so Patrol was never deployed.**
+- *Symptom:* `up.sh` timed out after 15 minutes waiting for the Patrol app ("last state: none"). Argo CD: every app Synced/Healthy except `kube-prometheus-stack` (Degraded); `root` Degraded with it. One pod not running: `kps-kube-prometheus-stack-operator`, stuck in **ContainerCreating**, 0 restarts.
+- *Why Patrol never appeared:* sync waves working as designed. Wave 0 (Patrol) is only created once every earlier wave is Healthy; one stuck pod in wave −1 held everything behind it.
+- *Cause:* turning off the operator's admission webhook (my decision, see above) also removed the Secret that holds the webhook's certificate (`kps-kube-prometheus-stack-admission`). But the operator's HTTPS server (`prometheusOperator.tls.enabled`, default true) still mounts that Secret. Kubernetes can't start a pod whose volume refers to a Secret that doesn't exist, and keeps waiting for it rather than failing, hence ContainerCreating forever with no restarts and no error in any log. The operator's ServiceMonitor also referred to the same Secret for its CA.
+- *My miss:* my render check confirmed the webhook objects were gone, but not that nothing still **referred** to them. Looking for what was removed isn't the same as looking for what depends on it.
+- *Fix:* `prometheusOperator.tls: { enabled: false }`. That port only serves the (now off) webhook and the operator's own metrics, inside the cluster. Re-rendered: identical object list; the operator now listens on plain HTTP 8080, with no volumes, and its ServiceMonitor and probes follow it.
+- *Prevention:* new `deploy/monitoring/check_references.py` + CI step: every Secret/ConfigMap a pod in the rendered chart mounts or reads must be created by the chart or listed as created by External Secrets (`grafana-admin`, `alertmanager-slack`). Proven both ways: **fails on the old render naming the exact Secret, passes on the fixed one.**
+- *Also:* `up.sh` now waits for `kube-prometheus-stack` by name before Patrol, and on any timeout prints every app's state and every pod that isn't running, so the next stall names its own cause instead of "patrol: none".
+- *Ruled out on the way:* pod slots per node (t3.medium allows 17): only one pod was not running, and it wasn't Pending.
 
 ---
 

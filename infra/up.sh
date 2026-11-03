@@ -89,12 +89,17 @@ wait_for_app() {  # wait_for_app NAME TIMEOUT_SECONDS
     sleep 10
   done
   echo "Timed out waiting for Argo CD app '$name' (last state: ${state:-none})." >&2
+  echo "All apps right now (an earlier wave that isn't Healthy holds back the later ones):" >&2
+  kubectl --context "$CLUSTER" -n argocd get applications.argoproj.io >&2 || true
+  echo "Pods that aren't running:" >&2
+  kubectl --context "$CLUSTER" get pods -A --no-headers | grep -v -E 'Running|Completed' >&2 || true
   echo "Check: kubectl --context $CLUSTER -n argocd describe application $name" >&2
   return 1
 }
 
-echo "==> Waiting for Argo CD: load balancer controller first (wave -1), then Patrol (wave 0)"
+echo "==> Waiting for Argo CD: platform apps first (waves -2 and -1), then Patrol (wave 0)"
 wait_for_app aws-load-balancer-controller 600
+wait_for_app kube-prometheus-stack 900
 wait_for_app patrol 900
 apps_ready=$(date +%s)
 

@@ -150,6 +150,8 @@ jobs:
           expect slack alertname=PatrolChecksStale severity=critical site=chess
           expect null  alertname=Watchdog severity=none
           expect null  alertname=CPUThrottlingHigh severity=info
+      - name: Every Secret and ConfigMap a monitoring pod needs exists
+        run: python3 deploy/monitoring/check_references.py kps.yaml
 
   shell:
     runs-on: ubuntu-24.04
