@@ -511,10 +511,23 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 
 **Also:** chart 0.3.0 → **0.3.1**. SLO dashboard notes: availability burn reads 0 with no 5xx; freshness numbers cover only the history Prometheus holds (empty at each rebuild); burn alerts wait for a full window. Checks run locally: promtool rules (19), unit tests 100/100, helm lint, kubeconform with CRD schemas 17/17, PrometheusRule rendered = source file, `check_references.py` clean, actionlint, shellcheck, pytest 30 passed.
 
+**Verification rebuild (close-out):** CI #9 green. `up.sh` everything up in 21m 05s, HTTPS OK. Controller **0 restarts, no termination reason**; all 7 apps Synced + Healthy.
+- **Controller memory, measured** (`max(container_memory_working_set_bytes{namespace="argocd", container="application-controller"})`): **peaks at ~650 MiB during the first sync** (every app being created at once), then settles at **~290–420 MiB**. *This is the proof of the root cause:* the startup peak alone is ~27% above the old 512 MiB limit, so the old controller was OOM-killed on every fresh build in the middle of syncing. The new 1 GiB limit leaves ~37% headroom at the peak; the 512 MiB request matches its steady state.
+- **Slack:** nothing new during this build: no freshness warning, no crash-loop alerts (the RESOLVED message for Tuesday's test alert is visible above).
+- **Grafana SLO board:** availability burn rate now draws flat lines at **0** (5m/1h/6h) instead of "No data". Both SLIs 100.000%, both budgets 100%. This time the freshness SLI didn't dip at startup at all; I haven't confirmed why (most likely Prometheus didn't scrape the status page until the first fresh checks had landed). Either way the guard means a dip like Monday's no longer alerts.
+
+**Process bug (mine): my delivery silently undid a commit I didn't know about.**
+- *Symptom:* the Actions list showed CI #8, "Fix Terraform resource counts and Argo CD controller memory" (`1cd545d`, Nov 4), between our sessions. My workspace didn't have it.
+- *What happened:* the close-out zip was built from my older copy. `rsync` laid it over the repo, so `infra/cluster/main.tf` and `infra/modules/vpc/main.tf` went back to the old versions, and the next commit (`dc8b250`) recorded that as a change. `git pull --rebase` couldn't catch it: the Nov 4 commit was already in the local history, so to git my commit was just a later edit. `git add -A` also committed three local backup files (`*.before-*`).
+- *What the Nov 4 commit changed:* (1) the node group now gets `kubernetes_version = var.kubernetes_version`, so the nodes follow the cluster's version when it's upgraded; (2) the VPC route-table associations count from the subnet **CIDR variables** (`length(var.public_subnet_cidrs)`) instead of from the subnet resources, so the count is a plain input known before anything exists; (3) the controller memory limit to 1Gi (already in the close-out, which also raised the request).
+- *Fix:* both Terraform files restored byte-for-byte from `1cd545d`; backup files removed from the repo; `*.before-*` added to `.gitignore`; my workspace now matches GitHub (including the three `.terraform.lock.hcl` files).
+- *Process fix:* before building any delivery, I ask for `git log --oneline -5` (or read the public repo) and start from the latest commit. A zip + rsync can't tell "file I changed" from "file I'm out of date on"; only starting from the latest commit can.
+
 ---
 
 ## Reminders (open items)
 
+- [ ] **Backstory for `1cd545d`** (Nov 4 Terraform fix): ask Steven what problem it solved, for the write-up.
 - [ ] **Repeatable builds:** consider a hashed lock file for transitive Python dependencies (botocore floated from 1.43.115 to 1.43.123 under the same requirements).
 
 - [ ] **Hardening:** after first login, change the Argo CD admin password and delete `argocd-initial-admin-secret` (Argo CD's own install notes recommend it). Fits Phase 6 (security) or the Argo CD values.

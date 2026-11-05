@@ -111,9 +111,10 @@ module "eks" {
 
   eks_managed_node_groups = {
     default = {
-      instance_types = var.node_instance_types
-      ami_type       = "AL2023_x86_64_STANDARD" # x86 to match the images built on the Intel Mac
-      capacity_type  = "ON_DEMAND"
+      kubernetes_version = var.kubernetes_version
+      instance_types     = var.node_instance_types
+      ami_type           = "AL2023_x86_64_STANDARD" # x86 to match the images built on the Intel Mac
+      capacity_type      = "ON_DEMAND"
 
       min_size     = var.node_min_size
       desired_size = var.node_desired_size
