@@ -99,7 +99,7 @@ slo = dashboard(
               [('1 - avg_over_time(patrol:checks_stale:ratio[24h])', "")],
               unit="percentunit", defaults={"decimals": 3, "thresholds": {"mode": "absolute", "steps": [
                   {"color": "red", "value": None}, {"color": "green", "value": 0.99}]}},
-              desc="Share of time every site's latest check was under 3 minutes old."),
+              desc="Share of time every site's latest check was under 3 minutes old. Covers the history Prometheus holds (up to 24h; it starts empty at each rebuild, so early in a session a minute of stale data right after startup weighs heavily here)."),
         panel(4, "Freshness error budget left (24h)", "gauge", 18, 0, 6, 5,
               [('1 - avg_over_time(patrol:checks_stale:ratio[24h]) / 0.01', "")],
               unit="percentunit", defaults={"min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [
@@ -111,14 +111,16 @@ slo = dashboard(
               defaults={"thresholds": {"mode": "absolute", "steps": [
                   {"color": "green", "value": None}, {"color": "orange", "value": 6}, {"color": "red", "value": 14.4}]},
                   "custom": {"thresholdsStyle": {"mode": "line"}}},
-              desc="Fast-burn alert: 1h AND 5m above 14.4. Slow-burn: 6h AND 30m above 6."),
+              desc="Fast-burn alert: 1h AND 5m above 14.4. Slow-burn: 6h AND 30m above 6. Reads 0 when there have been no 5xx at all."),
         panel(6, "Freshness burn rate", "timeseries", 12, 5, 12, 9,
               [('patrol:checks_stale:ratio_avg5m / 0.01', "5m"),
                ('patrol:checks_stale:ratio_avg1h / 0.01', "1h"),
                ('patrol:checks_stale:ratio_avg6h / 0.01', "6h")],
               defaults={"thresholds": {"mode": "absolute", "steps": [
                   {"color": "green", "value": None}, {"color": "orange", "value": 6}, {"color": "red", "value": 14.4}]},
-                  "custom": {"thresholdsStyle": {"mode": "line"}}}),
+                  "custom": {"thresholdsStyle": {"mode": "line"}}},
+              desc="Burn alerts only fire once Prometheus holds the full window (1h for fast, 6h for slow); "
+                   "until then, a stale site is caught by PatrolChecksStale within about 5 minutes."),
     ])
 
 if __name__ == "__main__":

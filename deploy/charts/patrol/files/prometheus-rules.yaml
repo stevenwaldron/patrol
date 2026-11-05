@@ -18,25 +18,34 @@
 # the copies (they read the same DynamoDB data; min of "up" = any replica sees
 # it down, min of "age" = the freshest view, ignoring one replica's 30 s cache).
 groups:
-  - name: patrol-sli.rules
+  # SLIs and the SLO alerts built on them live in ONE group on purpose: rules
+  # in a group run in order, so each alert sees the recording rules computed
+  # moments earlier in the same pass. In separate groups (as first built) the
+  # alerts read values up to 30 s old, and the alert text changed from run to
+  # run (unit tests flaked 10/60; same lesson as PatrolChecksStale below).
+  - name: patrol-slo
     interval: 30s
     rules:
       # --- SLO 1: status page availability ------------------------------------
+      # "or vector(0)": a counter series only exists once that label value has been
+      # seen. With zero 5xx ever, the 5xx side is EMPTY (not 0), so the ratio was
+      # empty too and the burn-rate panel showed "No data" exactly when things
+      # were healthiest (found live). Alerts were unaffected (empty never fires).
       - record: patrol:status_page_errors:ratio_rate5m
         expr: |
-          sum(rate(patrol_http_requests_total{code=~"5.."}[5m]))
+          (sum(rate(patrol_http_requests_total{code=~"5.."}[5m])) or vector(0))
           / sum(rate(patrol_http_requests_total[5m]))
       - record: patrol:status_page_errors:ratio_rate30m
         expr: |
-          sum(rate(patrol_http_requests_total{code=~"5.."}[30m]))
+          (sum(rate(patrol_http_requests_total{code=~"5.."}[30m])) or vector(0))
           / sum(rate(patrol_http_requests_total[30m]))
       - record: patrol:status_page_errors:ratio_rate1h
         expr: |
-          sum(rate(patrol_http_requests_total{code=~"5.."}[1h]))
+          (sum(rate(patrol_http_requests_total{code=~"5.."}[1h])) or vector(0))
           / sum(rate(patrol_http_requests_total[1h]))
       - record: patrol:status_page_errors:ratio_rate6h
         expr: |
-          sum(rate(patrol_http_requests_total{code=~"5.."}[6h]))
+          (sum(rate(patrol_http_requests_total{code=~"5.."}[6h])) or vector(0))
           / sum(rate(patrol_http_requests_total[6h]))
 
       # --- SLO 2: check freshness ---------------------------------------------
@@ -56,8 +65,7 @@ groups:
       - record: patrol:checks_stale:ratio_avg6h
         expr: avg_over_time(patrol:checks_stale:ratio[6h])
 
-  - name: patrol-slo.alerts
-    rules:
+      # --- SLO alerts (same group: see the note at the top of the group) ------
       - alert: PatrolStatusPageErrorBudgetFastBurn
         expr: |
           patrol:status_page_errors:ratio_rate1h > (14.4 * 0.005)
@@ -76,10 +84,19 @@ groups:
         annotations:
           summary: Status page errors are steadily eating the error budget.
           description: '5xx ratio over 6h is {{ $value | humanizePercentage }} (SLO allows 0.5%).'
+      # Freshness burn alerts only judge a window Prometheus actually holds.
+      # Right after a rebuild the status page shows the previous session's
+      # checks (from DynamoDB) for about a minute: honestly stale, but with only
+      # minutes of history "the 6h window" is really those minutes, so one stale
+      # minute looked like a crisis and fired the slow-burn warning on every
+      # rebuild (found live). The guard needs >= 90% of the window's samples
+      # (rules evaluate every 30 s: 120 per hour). Acute staleness is still
+      # caught within minutes by PatrolChecksStale, which has no such guard.
       - alert: PatrolCheckFreshnessFastBurn
         expr: |
           patrol:checks_stale:ratio_avg1h > (14.4 * 0.01)
           and patrol:checks_stale:ratio_avg5m > (14.4 * 0.01)
+          and on() count_over_time(patrol:checks_stale:ratio[1h]) >= 0.9 * 120
         for: 2m
         labels: { severity: critical, slo: check-freshness }
         annotations:
@@ -89,6 +106,7 @@ groups:
         expr: |
           patrol:checks_stale:ratio_avg6h > (6 * 0.01)
           and patrol:checks_stale:ratio_avg30m > (6 * 0.01)
+          and on() count_over_time(patrol:checks_stale:ratio[6h]) >= 0.9 * 720
         for: 15m
         labels: { severity: warning, slo: check-freshness }
         annotations:

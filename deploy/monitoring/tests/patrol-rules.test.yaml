@@ -105,11 +105,23 @@ tests:
               summary: Status page is failing requests fast enough to exhaust a 30-day error budget in about 2 days.
               description: 5xx ratio over 1h is 20% (SLO allows 0.5%).
 
-  # 6. A healthy status page (no 5xx) never burns budget.
+  # 6. A healthy status page (no 5xx) never burns budget, and its error ratio is
+  #    0 rather than missing (no 5xx series exists at all; the dashboard needs a number).
   - interval: 1m
     input_series:
       - series: 'patrol_http_requests_total{path="/", code="200"}'
         values: '0+100x120'
+    promql_expr_test:
+      - expr: patrol:status_page_errors:ratio_rate5m
+        eval_time: 30m
+        exp_samples:
+          - labels: 'patrol:status_page_errors:ratio_rate5m'
+            value: 0
+      - expr: patrol:status_page_errors:ratio_rate6h
+        eval_time: 2h
+        exp_samples:
+          - labels: 'patrol:status_page_errors:ratio_rate6h'
+            value: 0
     alert_rule_test:
       - eval_time: 2h
         alertname: PatrolStatusPageErrorBudgetFastBurn
@@ -134,3 +146,46 @@ tests:
             exp_annotations:
               summary: Prometheus cannot scrape any status page pod.
               description: Patrol's SLO and site alerts are blind until the status page is back.
+
+  # 8. Freshness after a rebuild: the previous session's checks are stale for
+  #    the first 3 minutes, then fresh. With only minutes of history the SLO burn
+  #    alerts must NOT fire (they would without the full-window guard).
+  - interval: 1m
+    input_series:
+      - series: 'patrol_site_last_checked_age_seconds{site="chess", pod="status-page-a"}'
+        values: '90000 90060 90120 30x60'
+    alert_rule_test:
+      # Checkpoints sit where each alert WOULD be firing without the guard
+      # (fast: ~3-7m; slow: ~18-32m), so removing a guard fails this test.
+      - eval_time: 5m
+        alertname: PatrolCheckFreshnessFastBurn
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: PatrolCheckFreshnessSlowBurn
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PatrolChecksStale     # stale for 3 min < its 5 min "for"
+        exp_alerts: []
+
+  # 9. A real freshness problem once a full hour of history exists: checks stop
+  #    at 70m. The fast burn still fires, and PatrolChecksStale fires first.
+  - interval: 1m
+    input_series:
+      - series: 'patrol_site_last_checked_age_seconds{site="chess", pod="status-page-a"}'
+        values: '30x69 90+60x30'
+    alert_rule_test:
+      - eval_time: 85m
+        alertname: PatrolChecksStale
+        exp_alerts:
+          - exp_labels: { severity: critical, site: chess }
+            exp_annotations:
+              summary: No fresh check for chess in over 5 minutes.
+              description: The scheduler or the workers have stopped working (latest check is 16m 30s old).
+      - eval_time: 85m
+        alertname: PatrolCheckFreshnessFastBurn
+        exp_alerts:
+          - exp_labels: { severity: critical, slo: check-freshness }
+            exp_annotations:
+              summary: Sites are not being checked on time; the freshness error budget is burning fast.
+              description: 'Stale share over 1h is 22.5% (SLO allows 1%).'
+

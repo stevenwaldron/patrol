@@ -111,7 +111,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Share of time every site's latest check was under 3 minutes old.",
+      "description": "Share of time every site's latest check was under 3 minutes old. Covers the history Prometheus holds (up to 24h; it starts empty at each rebuild, so early in a session a minute of stale data right after startup weighs heavily here).",
       "fieldConfig": {
         "defaults": {
           "decimals": 3,
@@ -212,7 +212,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Fast-burn alert: 1h AND 5m above 14.4. Slow-burn: 6h AND 30m above 6.",
+      "description": "Fast-burn alert: 1h AND 5m above 14.4. Slow-burn: 6h AND 30m above 6. Reads 0 when there have been no 5xx at all.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -285,7 +285,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "Burn alerts only fire once Prometheus holds the full window (1h for fast, 6h for slow); until then, a stale site is caught by PatrolChecksStale within about 5 minutes.",
       "fieldConfig": {
         "defaults": {
           "custom": {

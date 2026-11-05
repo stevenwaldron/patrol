@@ -8,6 +8,14 @@ global:
   domain: localhost:8080
 
 configs:
+  params:
+    # End any sync still running after 20 minutes (Argo CD's default, 0, waits
+    # forever). Found live in Phase 5: the controller was OOM-killed mid-sync and
+    # the sync sat "Running" for 43 minutes with no result, blocking that app's
+    # self-heal. With a timeout it ends as a visible Failed (up.sh prints it).
+    # 20 minutes, not less: the root app's first sync on a fresh cluster waits
+    # several minutes for each wave to turn healthy.
+    controller.sync.timeout.seconds: "1200"
   cm:
     # Check Git for changes every 2 minutes (± up to 1 minute of jitter).
     timeout.reconciliation: 120s
@@ -46,8 +54,12 @@ server:
     limits: { memory: 256Mi }
 
 controller:
+  # Keeps a live copy of every object it manages. 512Mi was enough for Phase 3
+  # (a few dozen objects); the monitoring stack (~100 objects plus the operator's
+  # very large CRDs) got it OOM-killed. Measured live after this change: see the
+  # running log.
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
+    requests: { cpu: 100m, memory: 512Mi }
     limits: { memory: 1Gi }
 
 repoServer:

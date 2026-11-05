@@ -458,6 +458,59 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 - *Also:* `up.sh` now waits for `kube-prometheus-stack` by name before Patrol, and on any timeout prints every app's state and every pod that isn't running, so the next stall names its own cause instead of "patrol: none".
 - *Ruled out on the way:* pod slots per node (t3.medium allows 17): only one pod was not running, and it wasn't Pending.
 
+**Bug (same session, while applying the fix live): the fix's sync hung for 43 minutes.**
+- *Symptom:* after pushing the fix, the operator pod came back healthy and Patrol deployed, but `kube-prometheus-stack` stayed **OutOfSync / Healthy**. The one differing object: the operator's ServiceMonitor, still the old HTTPS version pointing at the missing admission Secret (so Prometheus couldn't scrape the operator). Deleting it by hand: **not recreated**, despite `selfHeal: true`.
+- *Evidence:* Argo CD's record for the app: an automated sync of the fix commit (`2cb0558`), `phase: Running` since 19:46:30, **no message and no sync result at all** after 35+ minutes. While one sync is running, Argo CD starts no other, so self-heal couldn't act.
+- *Two of my guesses ruled out by the evidence:* (1) "a sync left over from before the fix": its start time and commit proved it was the fix sync itself; (2) the Grafana Helm test Pod: absent from the sync, consistent with the earlier source check that Argo CD never runs Helm test hooks.
+- *Recovery:* Argo CD UI → Terminate (recorded as "Failed: Operation terminated", 43m 4s), then a manual Sync: **Succeeded in 15 s**, "successfully synced (all tasks run)". Argo CD doesn't auto-retry a commit whose last sync failed, so the manual sync was needed. The application controller was also restarted afterwards (not needed by then; harmless). Final state: operator ServiceMonitor `[{honorLabels: true, port: http}]`, all 7 apps Synced + Healthy.
+- *Root cause of the hang:* not determined (no error was recorded anywhere). Most likely the sync started while the app was still Degraded from the first bug and never recovered. **One-off to an in-place upgrade:** a fresh `up.sh` creates everything from the fixed commit. Follow-up: consider Argo CD's sync timeout setting so a hung sync is ended automatically.
+
+**Live verification (after the fixes):** all 7 apps Synced + Healthy; `up.sh` rerun: everything up in 1m 02s, HTTPS OK. ExternalSecrets both `SecretSynced`, SecretStore `Valid`. Prometheus targets: status-page 2/2, worker 2/2, operator 1/1 (over plain HTTP, i.e. the fixed ServiceMonitor). `min by (site)(patrol_site_up)`: cloudforger 1, chess 1, broken-test 0. All 5 `patrol.alerts` rules Inactive, including **PatrolSiteDown while broken-test was down all evening (decision A, live)**. Grafana dashboards loaded from the chart's ConfigMaps: overview shows broken-test DOWN / 0.00%, chess and cloudforger UP / 100.00%; check age stays well under the 3-minute line. Two things the dashboards exposed:
+
+**Bug (found on the SLO dashboard): "Availability burn rate: No data" while the page was perfectly healthy.**
+- *Symptom:* the availability SLI stat showed 100.000% and budget 100%, but the burn-rate graph next to it was empty.
+- *Cause:* a counter series only exists once that label value has been used. With zero 5xx responses ever, `patrol_http_requests_total{code=~"5.."}` doesn't exist, so `sum(rate(...))` is **empty, not 0**, and empty ÷ anything is empty. The recording rules therefore produced nothing exactly when things were healthiest. The SLI stat had `or vector(0)`; the four recording rules didn't. My unit test "healthy page never burns" only checked that no alert fires, which an empty result also satisfies.
+- *Impact:* dashboard only. An empty value never fires an alert, and as soon as one 5xx happens the series exists and everything works.
+- *Fix:* `(sum(rate(…5xx…)) or vector(0)) / sum(rate(…))` in all four ratio rules. Test 6 now also asserts the ratio **is 0** (5m and 6h). Mutation check: removing the fix from one rule fails the test.
+
+**Finding: freshness budget at 65.5% (SLI 99.655%) after one evening.** The 6h freshness burn rate was ~0.9 at 22:00 and decaying, i.e. one stale period early in the session, not ongoing. Every check-age line since has stayed far under 3 minutes. Probable cause (to confirm with `patrol:checks_stale:ratio` over the session): right after a rebuild the status page reads the last checks from DynamoDB, left from the previous session hours or days ago, so every site is "stale" until the first new checks land (scheduler every 60 s + worker + 30 s cache). A minute or two of genuinely stale data, but in a window holding only ~5 hours of data (Prometheus has no disk and restarted at ~19:50), it shows up as a third of the budget. Honest reading: true to what a visitor saw, and amplified by the short history.
+
+**Root cause found for the 43-minute hung sync: Argo CD's application controller was being OOM-killed.**
+- *Symptom (seen in Slack, fired by the new monitoring itself, all since resolved):* KubePodCrashLooping, KubePodNotReady and KubeStatefulSetReplicasMismatch for `argocd/argocd-application-controller-0`.
+- *Evidence:* `lastState.terminated.reason: OOMKilled`, most recently at 00:42 local, even after the 20:32 restart (restartCount 1 since then).
+- *Cause:* my memory limit for the controller, **512 MiB**, sized in Phase 3 when it tracked a few dozen objects. The controller keeps a live copy of every object it manages; Phase 5 added the monitoring stack (~100 objects, plus the operator's very large CRDs). Over the limit, the kernel kills it. A sync in progress dies with it, and the record stays "Running" with no result, which is exactly the 43-minute hang. So the hang was not a one-off after all; it would keep recurring.
+- *Lesson:* adding a big platform component grows the GitOps controller's memory, not just the cluster's. Capacity planning has to include the control plane's own tools.
+- *Fix (next delivery):* raise the controller's memory (request and limit), and make sure a hung sync can't block an app forever.
+- *Bonus proof:* the alerting path worked unattended. Prometheus noticed a crash-looping pod in another namespace and Slack got it, resolved message included.
+
+**Test alert:** `amtool alert add PatrolTestAlert …` → in Alertmanager (`amtool alert query`: active) → `#patrol-alerts` at 1:03 AM. Note: amtool v0.34 warns about its new matcher parser unless annotation values are double-quoted: `--annotation='summary="…"'`.
+
+**Freshness slow-burn warning fired during the session** ("stale share over 6h is 6.061%", resolved). Same cause as the 65.5% budget: stale data right after the rebuild, with little history. Real alerting on real (brief) staleness, but it will happen on every rebuild, so it needs tuning.
+
+**Capacity, measured:** node 1 requests: CPU 645m (33%), memory 1134 MiB (34%); node 2: CPU 765m (39%), memory 1422 MiB (43%). **Total ≈ 2.5 GiB requested, as estimated in the plan.** Limits overcommit node 2 to 107% (only matters if every pod hits its limit at once). Room to give the Argo CD controller more memory.
+
+**Teardown with the monitoring stack:** `down.sh` → 58 destroyed (matches the 58 created), every leftover check ok, "Nothing left over", cluster down in 16m 45s. Cluster lifetime this session: ~19:15 → 01:30 (two bugs found and fixed live, root cause of a third identified).
+
+### Phase 5 close-out: fixes for what the live session found (plan approved, option A)
+
+**1. Argo CD application controller (the OOM behind the 43-minute hang).**
+- Memory request 256 → **512 MiB**, limit 512 MiB → **1 GiB** (`deploy/argocd/values.yaml`). Nodes had ~2.5 of ~6.6 GiB requested, so there's room.
+- **Sync timeout 20 min** (`configs.params: controller.sync.timeout.seconds: "1200"`). Argo CD's `--sync-timeout` default is 0 = never. Now a hung sync ends as a visible Failed instead of an invisible Running. 20 min because the root app's first sync on a fresh cluster legitimately waits several minutes per wave.
+- Rejected: memory only (next hang silent again); timeout only (treats the symptom while the controller keeps crashing).
+- Verified offline: rendered the argo-cd chart 10.11.6 with our values; the controller StatefulSet has requests 512Mi / limit 1Gi, and its `ARGOCD_APPLICATION_CONTROLLER_SYNC_TIMEOUT` env reads `controller.sync.timeout.seconds` = 1200 from `argocd-cmd-params-cm`.
+
+**2. Burn rate "No data" while healthy:** fixed earlier (`or vector(0)` + test asserting 0 + mutation check).
+
+**3. Freshness alerts on every rebuild: full-window guard (option A).**
+- Both freshness burn alerts now also require `count_over_time(patrol:checks_stale:ratio[window]) >= 90%` of the window's samples (120/hour at 30 s). PatrolChecksStale (raw metric, 5 min) is unchanged and still catches acute staleness quickly.
+- Rejected: ignoring the first minutes after startup (hides real stale data from the SLO); leaving it (a warning every rebuild trains people to ignore alerts).
+- Applied to freshness only: availability is a ratio of *events*, which stays fair on a partial window; freshness is a share of *time*, which a short history distorts.
+- New tests: (8) a 3-minute stale start does not fire either burn alert, with checkpoints placed exactly where each would fire without the guard (fast ~3–7m, slow ~18–32m); (9) a real outage after a full hour still fires the fast burn, and PatrolChecksStale fires too. **Mutations: removing either guard, or making the 1h guard too strict, each fails the tests 5/5.**
+- **Same flake again, found by the new test (10/60 runs):** the fast-burn alert text read 22.5% or 21.67% depending on timing. Cause: the SLO alerts were in a **different rule group** from the recording rules they read, so they saw values up to 30 s old: the same cross-group lag as the PatrolChecksStale flake earlier, which I had fixed for that one alert but not for the whole design. Fix: SLIs and SLO alerts merged into **one group** (`patrol-slo`). Rules in a group run in order, so each alert sees values computed moments earlier in the same pass. Result: **0/100** failures.
+- *Lesson:* when a fix applies to a pattern, apply it to every instance of the pattern, not only to the one that broke.
+
+**Also:** chart 0.3.0 → **0.3.1**. SLO dashboard notes: availability burn reads 0 with no 5xx; freshness numbers cover only the history Prometheus holds (empty at each rebuild); burn alerts wait for a full window. Checks run locally: promtool rules (19), unit tests 100/100, helm lint, kubeconform with CRD schemas 17/17, PrometheusRule rendered = source file, `check_references.py` clean, actionlint, shellcheck, pytest 30 passed.
+
 ---
 
 ## Reminders (open items)
