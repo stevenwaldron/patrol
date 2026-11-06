@@ -8,7 +8,7 @@ expectedNamespace: patrol
 image:
   registry: 419701112481.dkr.ecr.us-east-1.amazonaws.com
   # Git commit ID the images were built from (./app/push-images.sh prints it).
-  tag: "f8c5fe6"
+  tag: "d188e16"
   pullPolicy: IfNotPresent
 
 aws:
