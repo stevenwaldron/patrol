@@ -31,6 +31,18 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: kyverno
+  # The chart's policies.kyverno.io CRDs (from its kyverno-api subchart) are
+  # written with empty `labels: {}` and `annotations: {}`. Kubernetes stores an
+  # empty map as nothing, so Argo CD saw "{}" in Git vs "missing" in the cluster
+  # and reported those 11 CRDs OutOfSync forever (found live, Phase 6). Ignore
+  # those two fields ONLY when they're empty: a real label or annotation added
+  # in a later chart version would still be compared.
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      jqPathExpressions:
+        - .metadata.labels | select(. == {})
+        - .metadata.annotations | select(. == {})
   syncPolicy:
     automated:
       prune: true
