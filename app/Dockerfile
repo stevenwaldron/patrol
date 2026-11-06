@@ -45,8 +45,17 @@ ENV PATH=/opt/venv/bin:$PATH \
     PATROL_SITES_FILE=/app/config/sites.yaml
 # Remove the base image's own pip (and the installer wheels Python bundles for
 # "ensurepip") for the same reason: a runtime image has no use for an installer.
+# Same for Debian's installer, apt, and its library: Patrol never installs
+# anything at runtime (and couldn't: non-root, read-only filesystem). Found
+# 2026-11-06 when Trivy's database learned of CVE-2026-109518 (HIGH, apt 3.0.3,
+# fixed in 3.0.4): an image that passed one scan failed the next. With no apt in
+# the image there's nothing to flag. Plain dpkg (no --force): if anything in the
+# image ever depends on apt, the build fails here instead of breaking quietly.
+# The last line fails the build if apt is somehow still there.
 RUN python -m pip uninstall --yes pip \
- && rm -f /usr/local/lib/python3.*/ensurepip/_bundled/*.whl
+ && rm -f /usr/local/lib/python3.*/ensurepip/_bundled/*.whl \
+ && dpkg --purge apt $(dpkg-query -W -f '${Package}\n' 'libapt-pkg*') \
+ && ! command -v apt-get >/dev/null
 # A fixed, numeric, unprivileged user. Numeric matters: Kubernetes can only
 # verify "runAsNonRoot" when the image's USER is a number, not a name.
 RUN groupadd --system --gid 10001 patrol \

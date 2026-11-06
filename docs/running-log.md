@@ -566,10 +566,20 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 
 **Delivery method changed (process fix from the Nov 4 overwrite):** this zip contains **only the 23 files Phase 6 changes**, not the whole repo. While I built, PR #3 (dependency bumps) was merged on GitHub and a deploy PR was on its way; a full-repo zip would have reverted both. With only changed files, rsync can't touch anything else. Checked first that none of these files had changed on GitHub since my last sync.
 
+**Bug, found by the gate itself: Phase 6's push failed CI in the images jobs.**
+- *Symptom:* push `23c78ab` → policies green, all three **images** jobs red. Phase 6 didn't touch `app/`, and the same images had passed on deploy PR #4 minutes earlier.
+- *Cause:* PR #4's scan used a cached copy of Trivy's vulnerability database. This run downloaded a fresh one (04:38 UTC) that now listed **CVE-2026-109518 (HIGH)** in `apt` 3.0.3 / `libapt-pkg7.0` from the base image; Debian's fix is 3.0.4. Every Python package scanned clean (0), including the new FastAPI and boto3. Nothing was broken: the world learned something new between two scans.
+- *Exposure:* images `f8c5fe6` (in ECR, deployed by PR #4) contain it. Practical risk is low: the flaw is in how apt downloads packages, and Patrol never runs apt (non-root, read-only root filesystem). But "present but unused" is exactly what a scanner should still flag.
+- *Decision (approved): remove apt and libapt-pkg from the runtime images* (`dpkg --purge` in the runtime stage, as with pip in Phase 4), plus bump the pinned base image digest once `python:3.13-slim` ships apt 3.0.4. No installer in the image = no installer CVEs. Plain `dpkg --purge` (no `--force`): if anything ever depends on apt, the build fails loudly. The build also fails if `apt-get` is still on the PATH afterwards. Rejected: waiting for the new base image only (the next apt CVE fails us the same way); ignoring the CVE in Trivy (silences the gate instead of fixing anything).
+- *Lesson:* a scan result has a date. "Passed" means "no known fixable HIGH/CRITICAL *as of that database*". This is why a nightly re-scan of what's deployed is worth having (a later improvement).
+- *Process:* the GitHub ruleset (B1) waits until `main` is green again, or it would block the fix.
+
 ---
 
 ## Reminders (open items)
 
+- [ ] **Base image digest:** bump `python:3.13-slim` in `app/Dockerfile` once it ships apt ≥ 3.0.4 (Dependabot's docker updates hit ECR Public's anonymous rate limit, so check by hand).
+- [ ] **Nightly re-scan** of the deployed images (a scan result is only as current as Trivy's database).
 - [ ] **Backstory for `1cd545d`** (Nov 4 Terraform fix): ask Steven what problem it solved, for the write-up.
 - [ ] **Repeatable builds:** consider a hashed lock file for transitive Python dependencies (botocore floated from 1.43.115 to 1.43.123 under the same requirements).
 
