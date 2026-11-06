@@ -1,0 +1,12 @@
+# The CLI has no cluster, so it's told the namespace labels the policies select on.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Values
+metadata:
+  name: values
+namespaceSelector:
+  - name: patrol
+    labels:
+      kubernetes.io/metadata.name: patrol
+  - name: default
+    labels:
+      kubernetes.io/metadata.name: default

@@ -72,6 +72,27 @@ helm upgrade --install argocd argo-cd \
   --kube-context "$CLUSTER" --namespace argocd --create-namespace \
   --values "$REPO_ROOT/deploy/argocd/values.yaml" --wait --timeout 10m
 
+# The admin password Argo CD generates on first start: copy it to a file only you
+# can read (~/.patrol, mode 600), then delete the Secret from the cluster, as
+# Argo CD's own docs recommend. Nothing in the cluster can read it after that.
+# The password is never printed. On a rerun against the same cluster the
+# Secret is already gone and the saved file stays as it is.
+PASSWORD_FILE="$HOME/.patrol/argocd-admin-password"
+if kubectl --context "$CLUSTER" -n argocd get secret argocd-initial-admin-secret >/dev/null 2>&1; then
+  echo "==> Moving the Argo CD admin password out of the cluster (to ${PASSWORD_FILE})"
+  mkdir -p "$(dirname "$PASSWORD_FILE")" && chmod 700 "$(dirname "$PASSWORD_FILE")"
+  tmp=$(mktemp "${PASSWORD_FILE}.XXXXXX")   # mktemp creates it mode 600
+  kubectl --context "$CLUSTER" -n argocd get secret argocd-initial-admin-secret \
+    -o jsonpath='{.data.password}' | base64 -d > "$tmp"
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    echo "Could not read the Argo CD admin password; the Secret was left in place." >&2
+    exit 1
+  fi
+  mv "$tmp" "$PASSWORD_FILE"
+  kubectl --context "$CLUSTER" -n argocd delete secret argocd-initial-admin-secret
+fi
+
 echo "==> Handing the cluster to Git (root app reads deploy/argocd/apps)"
 kubectl --context "$CLUSTER" apply -f "$REPO_ROOT/deploy/argocd/root-app.yaml"
 
@@ -97,9 +118,13 @@ wait_for_app() {  # wait_for_app NAME TIMEOUT_SECONDS
   return 1
 }
 
-echo "==> Waiting for Argo CD: platform apps first (waves -2 and -1), then Patrol (wave 0)"
+# Waves: -2 External Secrets; -1 secrets, monitoring, load balancer controller,
+# ExternalDNS; 0 Kyverno; 1 policies; 2 Patrol. Each wave waits for the last.
+echo "==> Waiting for Argo CD: platform (waves -2 to 0), policies (1), then Patrol (2)"
 wait_for_app aws-load-balancer-controller 600
 wait_for_app kube-prometheus-stack 900
+wait_for_app kyverno 600
+wait_for_app patrol-policies 600
 wait_for_app patrol 900
 apps_ready=$(date +%s)
 
@@ -190,12 +215,16 @@ cat <<EOF
 Argo CD dashboard (private: only through your own machine):
   kubectl --context $CLUSTER -n argocd port-forward svc/argocd-server 8080:443
   then open https://localhost:8080  (a self-signed certificate warning is expected)
-  User: admin. Password (copy it, never screenshot it):
-  kubectl --context $CLUSTER -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+  User: admin. Password (kept only on this Mac; copy it, never screenshot it):
+  pbcopy < ~/.patrol/argocd-admin-password    # copies it to the clipboard
 
 Grafana (private: only through your own machine):
-  kubectl --context $CLUSTER -n monitoring port-forward svc/kps-grafana 3000:80
-  then open http://localhost:3000   (dashboards: Patrol: overview, Patrol: SLOs and error budgets)
+  kubectl --context $CLUSTER -n monitoring port-forward svc/kps-grafana 3001:80
+  then open http://localhost:3001   (dashboards: Patrol: overview, Patrol: SLOs and error budgets)
   User: admin. Password (generated in-cluster each rebuild; copy it, never screenshot it):
   kubectl --context $CLUSTER -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
+
+Kyverno policy results (Patrol's own rules, then the cluster-wide audit):
+  kubectl --context $CLUSTER -n patrol get policyreports
+  kubectl --context $CLUSTER get policyreports -A
 EOF

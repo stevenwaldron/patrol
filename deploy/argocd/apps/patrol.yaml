@@ -6,8 +6,9 @@ metadata:
   name: patrol
   namespace: argocd
   annotations:
-    # Wave 0: after the load balancer controller (wave -1) is healthy.
-    argocd.argoproj.io/sync-wave: "0"
+    # Wave 2: after the load balancer controller (wave -1) is healthy and the
+    # policies that check Patrol's pods (wave 1) are loaded and ready.
+    argocd.argoproj.io/sync-wave: "2"
   finalizers:
     # Deleting this app deletes Patrol's objects, including the Ingress, so the
     # (still running) controller removes the ALB. infra/down.sh relies on this.
@@ -34,3 +35,14 @@ spec:
         # The controller adds a readiness gate to every new Patrol pod: a rolling
         # update only continues once the ALB itself reports the new pod healthy.
         elbv2.k8s.aws/pod-readiness-gate-inject: enabled
+        # Kubernetes' built-in Pod Security Admission: reject any pod that
+        # doesn't meet the "restricted" standard (non-root, no privilege
+        # escalation, all capabilities dropped, seccomp on, safe volume types).
+        # No extra software, so it still works if Kyverno is down. Kyverno adds
+        # Patrol's own rules on top (deploy/platform/policies). Version pinned
+        # to the cluster's, so a Kubernetes upgrade can't change the rules
+        # silently.
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: v1.36
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/warn-version: v1.36

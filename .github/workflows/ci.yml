@@ -28,6 +28,8 @@ env:
   PROMETHEUS_VERSION: 3.15.1
   ALERTMANAGER_VERSION: 0.34.2      # same as the cluster runs (kube-prometheus-stack 92.17.0)
   KPS_CHART_VERSION: 92.17.0
+  KYVERNO_VERSION: v1.19.2          # CLI = the Kyverno the cluster runs (chart 3.9.2)
+  KYVERNO_CHART_VERSION: 3.9.2
   # Schemas for custom resources (ServiceMonitor, PrometheusRule, ExternalSecret,
   # Argo CD Application...), so they get the same strict check as built-in ones.
   CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
@@ -75,11 +77,14 @@ jobs:
           kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
             -schema-location default -schema-location "$CRD_SCHEMAS" \
             rendered-https.yaml rendered-http.yaml
-      - name: Validate platform manifests (secrets, Argo CD apps)
+      - name: Validate platform manifests (secrets, policies, Argo CD apps)
+        # Named paths, not all of deploy/platform: that folder also holds Helm
+        # values files and the policies' test fixtures, which aren't manifests.
         run: |
           kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
             -schema-location default -schema-location "$CRD_SCHEMAS" \
-            deploy/platform deploy/argocd/root-app.yaml deploy/argocd/apps
+            deploy/platform/secrets deploy/platform/policies/*.yaml \
+            deploy/argocd/root-app.yaml deploy/argocd/apps
       - name: Guard rails still refuse bad input
         # (Not "! helm ...": under bash -e a "!"-prefixed command never fails the step.)
         run: |
@@ -150,8 +155,64 @@ jobs:
           expect slack alertname=PatrolChecksStale severity=critical site=chess
           expect null  alertname=Watchdog severity=none
           expect null  alertname=CPUThrottlingHigh severity=info
+          expect slack alertname=TargetDown severity=warning namespace=kyverno
       - name: Every Secret and ConfigMap a monitoring pod needs exists
         run: python3 deploy/monitoring/check_references.py kps.yaml
+
+  policies:
+    # Kyverno policies are tested like code: each rule against pods built to
+    # break it, and every policy (Patrol's own + the Pod Security "restricted"
+    # library that Pod Security Admission also enforces) against the chart Argo
+    # CD will deploy. A chart change that would be rejected in the cluster fails
+    # here first.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Install the Kyverno CLI (checksum verified)
+        run: |
+          cd "$RUNNER_TEMP"
+          file="kyverno-cli_${KYVERNO_VERSION}_linux_x86_64.tar.gz"
+          base="https://github.com/kyverno/kyverno/releases/download/${KYVERNO_VERSION}"
+          curl -fsSLO "${base}/${file}"
+          curl -fsSL "${base}/checksums.txt" | grep " ${file}\$" | sha256sum -c -
+          tar xzf "$file" kyverno
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Policy tests (good pods pass, each bad pod fails its rule)
+        run: kyverno test deploy/platform/policies/tests
+      - name: Patrol's chart passes every policy
+        run: |
+          helm template patrol deploy/charts/patrol --namespace patrol > patrol.yaml
+          # helm template leaves metadata.namespace empty; the policies select
+          # the patrol namespace, so set it the way Argo CD will.
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open("patrol.yaml")) if d]
+          for d in docs:
+              d["metadata"].setdefault("namespace", "patrol")
+          yaml.safe_dump_all(docs, open("patrol.yaml", "w"), sort_keys=False)
+          PY
+          helm template kyverno-policies kyverno-policies --repo https://kyverno.github.io/kyverno \
+            --version "$KYVERNO_CHART_VERSION" --namespace kyverno \
+            -f deploy/platform/policy-library/values.yaml > library.yaml
+          # Exits non-zero on any failed check (Audit policies included).
+          kyverno apply deploy/platform/policies/*.yaml library.yaml --resource patrol.yaml \
+            --values-file deploy/platform/policies/tests/values.yaml | tee apply.txt
+          # Guard against "passes" because nothing matched (e.g. a selector typo).
+          grep -Eq 'pass: [1-9][0-9]*, fail: 0' apply.txt \
+            || { echo "No policy matched Patrol's workloads: check the selectors" >&2; exit 1; }
+      - name: Kyverno chart renders with our settings
+        run: |
+          helm template kyverno kyverno --repo https://kyverno.github.io/kyverno \
+            --version "$KYVERNO_CHART_VERSION" --namespace kyverno \
+            -f deploy/platform/kyverno/values.yaml > kyverno.yaml
+          grep -q -- '--forceFailurePolicyIgnore=true' kyverno.yaml \
+            || { echo "Kyverno webhooks are not forced to failurePolicy Ignore" >&2; exit 1; }
+          python3 deploy/monitoring/check_references.py kyverno.yaml
 
   shell:
     runs-on: ubuntu-24.04

@@ -1,0 +1,37 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: patrol-read-only-root-fs
+  annotations:
+    policies.kyverno.io/title: Read-only root filesystem
+    policies.kyverno.io/description: >-
+      Every container must run with a read-only root filesystem, so a compromised process can't modify the application or drop tools into the image. Scratch space comes from a small emptyDir.
+spec:
+  # Audit: record results in PolicyReports, block nothing. Switched to Deny once
+  # the reports show Patrol passes (see the running log).
+  validationActions: [Audit]
+  failurePolicy: Ignore          # Pod Security Admission is the backstop
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: patrol
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers +
+        (has(object.spec.initContainers) ? object.spec.initContainers : [])
+  validations:
+    - expression: >-
+        variables.containers.all(c,
+          has(c.securityContext) && has(c.securityContext.readOnlyRootFilesystem) &&
+          c.securityContext.readOnlyRootFilesystem == true)
+      messageExpression: >-
+        'securityContext.readOnlyRootFilesystem must be true for: ' +
+        variables.containers.filter(c, !(has(c.securityContext) &&
+          has(c.securityContext.readOnlyRootFilesystem) &&
+          c.securityContext.readOnlyRootFilesystem == true)).map(c, c.name).join(', ')

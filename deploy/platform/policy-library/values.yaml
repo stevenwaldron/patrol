@@ -1,0 +1,12 @@
+# Kyverno's Pod Security Standards library (chart kyverno-policies 3.9.2), as
+# CEL ValidatingPolicies, cluster-wide, AUDIT ONLY: it never blocks anything, it
+# fills policy reports showing where every workload stands against the
+# "restricted" standard. Third-party components are expected to fall short
+# where they genuinely need host access (e.g. node-exporter, the VPC CNI);
+# the reports make that visible instead of hidden.
+# Patrol itself is ENFORCED separately: built-in Pod Security Admission
+# ("restricted") plus Patrol's own rules in deploy/platform/policies.
+policyType: ValidatingPolicy        # CEL policies; ClusterPolicy is deprecated in Kyverno 1.19
+podSecurityStandard: restricted     # includes everything in "baseline"
+validationFailureAction: Audit
+failurePolicy: Ignore               # also forced by Kyverno's forceFailurePolicyIgnore

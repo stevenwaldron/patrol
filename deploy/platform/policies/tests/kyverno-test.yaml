@@ -1,0 +1,71 @@
+# kyverno test deploy/platform/policies/tests
+# Each rule: the good pods pass, the pod built to break it fails. Pods in other
+# namespaces are out of scope (no result at all).
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: patrol-policies
+policies:
+  - ../allowed-images.yaml
+  - ../pinned-images.yaml
+  - ../read-only-root-fs.yaml
+  - ../require-resources.yaml
+  - ../no-token-automount.yaml
+resources:
+  - resources.yaml
+variables: values.yaml
+results:
+  - policy: patrol-allowed-images
+    kind: Pod
+    resources: [good, good-digest, bad-latest-tag, bad-no-tag, bad-writable-root, bad-no-resources, bad-token-mounted, bad-short-tag, bad-no-cpu-request, bad-no-memory-limit]
+    result: pass
+  - policy: patrol-allowed-images
+    kind: Pod
+    resources: [bad-docker-hub, bad-lookalike-registry, bad-init-container]
+    result: fail
+
+  - policy: patrol-pinned-images
+    kind: Pod
+    resources: [good, good-digest, bad-docker-hub, bad-lookalike-registry, bad-writable-root, bad-no-resources, bad-token-mounted, bad-no-cpu-request, bad-no-memory-limit]
+    result: pass
+  - policy: patrol-pinned-images
+    kind: Pod
+    resources: [bad-latest-tag, bad-no-tag, bad-short-tag, bad-init-container]
+    result: fail
+
+  - policy: patrol-read-only-root-fs
+    kind: Pod
+    resources: [good, good-digest, bad-docker-hub, bad-latest-tag, bad-no-resources, bad-token-mounted, bad-init-container, bad-short-tag, bad-no-cpu-request, bad-no-memory-limit]
+    result: pass
+  - policy: patrol-read-only-root-fs
+    kind: Pod
+    resources: [bad-writable-root]
+    result: fail
+
+  - policy: patrol-require-resources
+    kind: Pod
+    resources: [good, good-digest, bad-docker-hub, bad-latest-tag, bad-writable-root, bad-token-mounted, bad-init-container, bad-short-tag]
+    result: pass
+  - policy: patrol-require-resources
+    kind: Pod
+    resources: [bad-no-resources, bad-no-cpu-request, bad-no-memory-limit]
+    result: fail
+
+  - policy: patrol-no-token-automount
+    kind: Pod
+    resources: [good, good-digest, bad-docker-hub, bad-latest-tag, bad-writable-root, bad-no-resources, bad-init-container, bad-short-tag, bad-no-cpu-request, bad-no-memory-limit]
+    result: pass
+  - policy: patrol-no-token-automount
+    kind: Pod
+    resources: [bad-token-mounted]
+    result: fail
+
+  # Autogen: the Deployment is rejected before any pod is created.
+  - policy: patrol-allowed-images
+    kind: Deployment
+    resources: [bad-deployment]
+    result: fail
+  - policy: patrol-pinned-images
+    kind: Deployment
+    resources: [bad-deployment]
+    result: fail

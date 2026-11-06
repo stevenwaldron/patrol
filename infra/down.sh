@@ -173,5 +173,7 @@ else
 fi
 
 kubectl config delete-context "$CLUSTER" >/dev/null 2>&1 || true
+# The Argo CD admin password up.sh saved belongs to the cluster that's now gone.
+rm -f "$HOME/.patrol/argocd-admin-password"
 elapsed=$(( $(date +%s) - started ))
 printf '==> Cluster down in %dm %02ds\n' $((elapsed / 60)) $((elapsed % 60))

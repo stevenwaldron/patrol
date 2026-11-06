@@ -1,0 +1,28 @@
+# Patrol's own admission rules (deploy/platform/policies): Kyverno CEL
+# ValidatingPolicies for the patrol namespace. See that folder's README.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: patrol-policies
+  namespace: argocd
+  annotations:
+    # Wave 1: needs Kyverno's policy CRDs (wave 0). Patrol (wave 2) waits until
+    # every policy here reports Ready (health check in deploy/argocd/values.yaml),
+    # so no Patrol pod is ever created before its rules are loaded.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/stevenwaldron/patrol.git
+    targetRevision: main
+    # Directory sources aren't recursive by default, so tests/ (fixtures for the
+    # Kyverno CLI, including deliberately bad pods) is never applied.
+    path: deploy/platform/policies
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

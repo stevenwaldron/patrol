@@ -38,6 +38,31 @@ configs:
         end
       end
       return hs
+    # Kyverno policies count as healthy only once Kyverno has loaded them
+    # (status.conditionStatus.ready, set by Kyverno's policy status controller).
+    # Without this, Argo CD treats a policy as healthy the moment it's stored,
+    # and Patrol's pods (next wave) could be created before their rules apply.
+    resource.customizations.health.policies.kyverno.io_ValidatingPolicy: |
+      hs = {}
+      if obj.status ~= nil and obj.status.conditionStatus ~= nil then
+        local cs = obj.status.conditionStatus
+        if cs.ready == true then
+          hs.status = "Healthy"
+          hs.message = "loaded by Kyverno"
+          return hs
+        end
+        if cs.ready == false then
+          -- Progressing, not Degraded: right after creation a policy is briefly
+          -- "not ready" while Kyverno sets up its webhook. If it stays here, the
+          -- message says why, and the 20-minute sync timeout ends the wait.
+          hs.status = "Progressing"
+          hs.message = "not ready yet: " .. (cs.message or "see the policy's status.conditionStatus")
+          return hs
+        end
+      end
+      hs.status = "Progressing"
+      hs.message = "waiting for Kyverno to load the policy"
+      return hs
 
 # Not needed here: single sign-on (Dex) and notifications. Off = less memory,
 # fewer moving parts. Slack alerts come from Alertmanager in Phase 5.

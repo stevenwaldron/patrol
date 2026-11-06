@@ -1,0 +1,40 @@
+# Kyverno (chart 3.9.2 = Kyverno v1.19.2): the policy engine. It sits in the API
+# server's admission path and checks objects against the rules in
+# deploy/platform/policies before they are stored.
+# Settings live in Git (deploy/platform/kyverno/values.yaml) and CI renders the
+# real chart with them, same pattern as the monitoring stack.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno
+  namespace: argocd
+  annotations:
+    # Wave 0: after the monitoring stack (wave -1), because Kyverno's
+    # ServiceMonitors need the ServiceMonitor CRD; before the policies (wave 1),
+    # which need Kyverno's policy CRDs; and before Patrol (wave 2).
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: default
+  sources:
+    - repoURL: https://kyverno.github.io/kyverno
+      chart: kyverno
+      targetRevision: 3.9.2
+      helm:
+        releaseName: kyverno
+        valueFiles:
+          - $values/deploy/platform/kyverno/values.yaml
+    - repoURL: https://github.com/stevenwaldron/patrol.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # Kyverno's CRDs are too large for client-side apply

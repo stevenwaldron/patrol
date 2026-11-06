@@ -1,0 +1,38 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: patrol-require-resources
+  annotations:
+    policies.kyverno.io/title: Memory limit and CPU request
+    policies.kyverno.io/description: >-
+      Every container must set a memory limit (so one leak can't starve the node) and a CPU request (so the scheduler places it sensibly).
+spec:
+  # Audit: record results in PolicyReports, block nothing. Switched to Deny once
+  # the reports show Patrol passes (see the running log).
+  validationActions: [Audit]
+  failurePolicy: Ignore          # Pod Security Admission is the backstop
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: patrol
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers +
+        (has(object.spec.initContainers) ? object.spec.initContainers : [])
+  validations:
+    - expression: >-
+        variables.containers.all(c,
+          has(c.resources) &&
+          has(c.resources.limits) && 'memory' in c.resources.limits &&
+          has(c.resources.requests) && 'cpu' in c.resources.requests)
+      messageExpression: >-
+        'resources.limits.memory and resources.requests.cpu are required for: ' +
+        variables.containers.filter(c, !(has(c.resources) &&
+          has(c.resources.limits) && 'memory' in c.resources.limits &&
+          has(c.resources.requests) && 'cpu' in c.resources.requests)).map(c, c.name).join(', ')

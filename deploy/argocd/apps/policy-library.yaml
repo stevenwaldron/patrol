@@ -1,0 +1,32 @@
+# Kyverno's Pod Security Standards library, audit-only, cluster-wide.
+# See deploy/platform/policy-library/values.yaml for why audit-only.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: policy-library
+  namespace: argocd
+  annotations:
+    # Wave 1: needs Kyverno's policy CRDs (wave 0).
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: default
+  sources:
+    - repoURL: https://kyverno.github.io/kyverno
+      chart: kyverno-policies
+      targetRevision: 3.9.2
+      helm:
+        releaseName: kyverno-policies
+        valueFiles:
+          - $values/deploy/platform/policy-library/values.yaml
+    - repoURL: https://github.com/stevenwaldron/patrol.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

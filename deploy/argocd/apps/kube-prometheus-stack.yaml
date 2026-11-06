@@ -8,7 +8,7 @@ metadata:
   namespace: argocd
   annotations:
     # Wave -1: its CRDs (ServiceMonitor, PrometheusRule) must exist before
-    # Patrol's chart (wave 0) uses them.
+    # Patrol's chart (wave 2) and Kyverno (wave 0) use them.
     argocd.argoproj.io/sync-wave: "-1"
   finalizers:
     - resources-finalizer.argocd.argoproj.io/foreground

@@ -1,0 +1,56 @@
+# Kyverno v1.19.2 (chart 3.9.2) settings, applied by deploy/argocd/apps/kyverno.yaml.
+
+features:
+  # Every Kyverno webhook "allows if Kyverno is down" instead of "blocks
+  # everything". The backstop is Kubernetes' built-in Pod Security Admission,
+  # which enforces the "restricted" standard on the patrol namespace with no
+  # extra software (label in deploy/argocd/apps/patrol.yaml). So if Kyverno is
+  # unavailable, Patrol's custom rules pause but the core security rules don't,
+  # and the cluster stays usable (including teardown, which deletes Kyverno last).
+  forceFailurePolicyIgnore:
+    enabled: true
+
+crds:
+  # The migration Job is a Helm post-upgrade hook, which Argo CD runs as a
+  # PostSync hook on EVERY sync. It only matters when upgrading Kyverno over
+  # existing objects; this cluster is rebuilt fresh each session. When Kyverno is
+  # upgraded in place, run `kyverno migrate` deliberately instead.
+  migration:
+    enabled: false
+
+# Helm pre-delete hooks: Argo CD never runs them (it only maps install/upgrade
+# hooks; checked in Argo CD v3.5.6's source), so disable rather than ship dead
+# objects. Kyverno's webhooks are harmless after teardown (failurePolicy Ignore).
+webhooksCleanup:
+  enabled: false
+
+admissionController:
+  replicas: 1          # lab cluster; production: 3 (it's in every API write)
+  container:
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 384Mi }
+  serviceMonitor:
+    enabled: true
+
+backgroundController:
+  # Re-checks existing objects against policies (fills the policy reports).
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 192Mi }
+  serviceMonitor:
+    enabled: true
+
+reportsController:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  serviceMonitor:
+    enabled: true
+
+# Only for CleanupPolicy/DeletingPolicy, which Patrol doesn't use: one pod less
+# (t3.medium nodes fit 17 pods each).
+cleanupController:
+  enabled: false

@@ -1,0 +1,32 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: patrol-no-token-automount
+  annotations:
+    policies.kyverno.io/title: No Kubernetes API token in Patrol pods
+    policies.kyverno.io/description: >-
+      Patrol's services never call the Kubernetes API, and their AWS access comes from EKS Pod Identity, so pods must set automountServiceAccountToken: false. A stolen token can't be used against the cluster if there isn't one.
+spec:
+  # Audit: record results in PolicyReports, block nothing. Switched to Deny once
+  # the reports show Patrol passes (see the running log).
+  validationActions: [Audit]
+  failurePolicy: Ignore          # Pod Security Admission is the backstop
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: patrol
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers +
+        (has(object.spec.initContainers) ? object.spec.initContainers : [])
+  validations:
+    - expression: >-
+        has(object.spec.automountServiceAccountToken) &&
+        object.spec.automountServiceAccountToken == false
+      message: spec.automountServiceAccountToken must be false

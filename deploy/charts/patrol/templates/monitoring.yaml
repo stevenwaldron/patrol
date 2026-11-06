@@ -1,7 +1,7 @@
 {{- if .Values.monitoring.enabled }}
 {{- /*
 Monitoring for Patrol (needs kube-prometheus-stack's CRDs: wave -1 installs them
-before this chart, wave 0).
+before this chart, wave 2).
 - ServiceMonitors: tell Prometheus to scrape the worker and status page /metrics
   (inside the cluster only; the ALB blocks /metrics from the internet).
 - PrometheusRule: SLOs, burn-rate alerts, site/staleness alerts. Source of truth is

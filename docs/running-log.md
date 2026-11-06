@@ -523,6 +523,49 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 - *Fix:* both Terraform files restored byte-for-byte from `1cd545d`; backup files removed from the repo; `*.before-*` added to `.gitignore`; my workspace now matches GitHub (including the three `.terraform.lock.hcl` files).
 - *Process fix:* before building any delivery, I ask for `git log --oneline -5` (or read the public repo) and start from the latest commit. A zip + rsync can't tell "file I changed" from "file I'm out of date on"; only starting from the latest commit can.
 
+**Phase 5 complete** (Nov 5): CI #10 green on `bb29781`; workspace identical to GitHub `main`.
+
+---
+
+## Phase 6: policy guardrails (Kyverno, Pod Security Admission)
+
+**Plan approved.** Decisions: **A1** (Argo CD admin password moved out of the cluster), **B1** (GitHub ruleset on `main`, Steven on the bypass list).
+
+**Dependabot first.** PR #1 (boto3, FastAPI) was tested locally (30 passed), but its images jobs failed after `@dependabot rebase`. Dependabot then closed it and opened **PR #3** (boto3 1.43.123, FastAPI 0.162.0, pytest 9.2.0, moto 5.2.5) on today's `main`: all green, including Trivy. *Why #1 failed:* it was built on the Phase 4 code, from before pip was removed from the images, so Trivy flagged pip's bundled packages again. A green Dependabot PR depends on the base it was built on, not only on its own diff.
+
+**Research finding that shaped the design:** Kyverno **1.19 deprecated `ClusterPolicy`** (and `Policy`, the cleanup policies, the legacy PolicyException); **1.20 removes them** (1.20.0-rc.1 already tagged). Built on the replacement: CEL **`ValidatingPolicy` (`policies.kyverno.io/v1`)**, the same expression language as Kubernetes' own ValidatingAdmissionPolicy. Version: **Kyverno 1.19.2 / chart 3.9.2** (released 2026-10-21, latest stable). Rejected: ClusterPolicy (most tutorials still show it, but it would be removed within weeks).
+
+**Three layers:**
+| Layer | Scope | Mode |
+|---|---|---|
+| Pod Security Admission (built into Kubernetes), `restricted`, version pinned to v1.36 | `patrol` namespace label | Enforce (+ warn) |
+| Patrol's own Kyverno rules (5) | `patrol` namespace | Audit first, then Deny |
+| Kyverno's Pod Security library, `restricted` (17 CEL policies) | whole cluster | Audit only (reports, never blocks) |
+- Patrol's rules: images only from `419701112481.dkr.ecr.us-east-1.amazonaws.com/patrol/`; tag must be a 7–40 hex commit ID or the image pinned by `@sha256`; read-only root filesystem; memory limit + CPU request; `automountServiceAccountToken: false`. Containers and init containers both checked. Kyverno's **autogen** applies the same rules to Deployments/CronJobs/Jobs, so a bad Deployment is rejected at sync time, not later when its ReplicaSet tries to make pods.
+- Decision: **all Kyverno webhooks fail open** (`features.forceFailurePolicyIgnore`). If Kyverno is down, its webhook either blocks every API write or allows them; with the built-in PSA as backstop, "allow" keeps the cluster usable (including teardown, which deletes Kyverno near the end) while the core rules stay enforced. Rejected: fail closed (one Kyverno outage blocks all deploys and can deadlock recovery).
+- Decision: PSA for the standard, Kyverno for what PSA can't express (registry, tag format, read-only FS, resources, token). Rejected: Kyverno for everything (single point of enforcement).
+- Decision: library audit-only, cluster-wide. Third-party components (node-exporter, the VPC CNI…) legitimately need host access; reports make that visible. Rejected: enforcing it cluster-wide (breaks EKS system pods), or not installing it (no visibility).
+
+**Waves now:** −2 External Secrets; −1 secrets, monitoring, load balancer controller, ExternalDNS; **0 Kyverno** (its ServiceMonitors need the monitoring stack's CRD); **1 policies** (need Kyverno's CRDs); **2 Patrol**. A new Argo CD **health check for `ValidatingPolicy`** (healthy only when Kyverno reports `status.conditionStatus.ready`) makes wave 2 wait until the rules are actually loaded, so no Patrol pod can slip in first. "Not ready" counts as Progressing, not Degraded: right after creation a policy is briefly not ready while Kyverno sets up its webhook. The Lua was unit-tested (lupa) for every status shape.
+
+**Kyverno settings** (`deploy/platform/kyverno/values.yaml`): 1 replica each of admission, background and reports controllers; **cleanup controller off** (we use no cleanup policies; one pod less, with t3.medium's 17-pod limit); ServiceMonitors on (TargetDown → Slack via the existing route, added to the amtool route tests).
+- **Two chart hooks Argo CD handles differently from Helm** (checked in Argo CD v3.5.6's gitops-engine source, `sync/hook/helm/type.go`): it only maps pre/post-install/upgrade. So the `pre-delete` webhook-cleanup Jobs would never run (disabled, not shipped as dead objects), and the **post-upgrade CRD migration Job would run as PostSync on every sync** (disabled; when upgrading Kyverno in place, run `kyverno migrate` deliberately).
+- Verified offline: rendered from source at v1.19.2 (the chart's `kyverno-api` subchart from kyverno/api at v0.0.1-alpha.4, other optional subcharts stubbed; their conditions are off): 3 Deployments with the set resources, `--forceFailurePolicyIgnore=true`, 3 ServiceMonitors, no hook Jobs left except two Helm *test* Pods (never run by Argo CD); `check_references.py` clean.
+
+**Tests (shift left):**
+- `deploy/platform/policies/tests/`: Kyverno CLI test with 2 good pods (commit tag; digest) and one bad pod per rule built to break *exactly one* rule, plus an init-container case, a pod in another namespace (out of scope) and a bad Deployment (autogen): **63 assertions pass**.
+- **Mutation-tested: 7 deliberate policy bugs, each caught.** The first round found **two gaps in my tests**: (1) loosening the tag rule to allow short tags survived (added `:abc12`); (2) dropping the CPU-request check survived because my "no CPU request" pod had no `requests` at all, so a different clause failed it (rebuilt it with a memory request but no CPU).
+- Patrol's rendered chart vs. all 22 policies (5 own + 17 library): **66 pass, 0 fail.** This also proves PSA "restricted" will admit Patrol, before turning it on.
+- **Surprise:** `helm template` leaves `metadata.namespace` empty, so namespace-selected policies matched *nothing* and the CLI reported "pass: 0, fail: 0", which looks green. CI sets the namespace the way Argo CD will, and fails if there isn't at least one pass. Proven both ways (a selector typo now fails CI).
+- `kubeconform` validates the policies strictly (datree catalog has `policies.kyverno.io` v1); a deliberate typo (`validationAction`) is caught. The platform validation step now names its paths: `deploy/platform` also holds Helm values files and test fixtures, which aren't manifests.
+- New CI job `policies`: Kyverno CLI **v1.19.2, checksum-verified**; policy tests; chart vs. all policies; Kyverno chart rendered from the real repo with our values (fail-open flag present, references clean). actionlint clean.
+
+**A1, Argo CD admin password:** `up.sh` now copies the generated password to `~/.patrol/argocd-admin-password` (directory 700, file 600 via `mktemp`, written then moved into place), checks it isn't empty, and **deletes `argocd-initial-admin-secret`** (Argo CD's docs recommend it). It never prints the password; the summary says `pbcopy < ~/.patrol/argocd-admin-password`. A rerun against the same cluster leaves the file alone. `down.sh` removes the file (it belongs to the destroyed cluster). Tested with a stand-in kubectl: modes 700/600, Secret deleted, rerun safe.
+- Rejected: leaving the Secret (any identity that can read Secrets in `argocd` could read the admin password); an AWS Secrets Manager-managed password (Argo CD is installed before External Secrets exists: chicken and egg).
+- Also: Grafana's port-forward suggestion moved to 3001 (3000 was taken on the Mac in Phase 5); up.sh also prints the policy-report commands.
+
+**Delivery method changed (process fix from the Nov 4 overwrite):** this zip contains **only the 23 files Phase 6 changes**, not the whole repo. While I built, PR #3 (dependency bumps) was merged on GitHub and a deploy PR was on its way; a full-repo zip would have reverted both. With only changed files, rsync can't touch anything else. Checked first that none of these files had changed on GitHub since my last sync.
+
 ---
 
 ## Reminders (open items)
@@ -534,4 +577,4 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 
 - [x] **Phase 4:** Trivy gate (`HIGH,CRITICAL`, `--ignore-unfixed`, exit 1) and Dependabot for the base-image digest: built into ci.yml/release.yml/dependabot.yml.
 
-- [ ] **After Phase 5:** update the GitHub repo description to mention Argo CD, Helm, Prometheus, Grafana and Slack alerts (e.g. "…deployed with Argo CD and Helm, monitored with Prometheus, Grafana and Slack alerts"), and add the topics `argocd`, `helm`, `prometheus`, `grafana`.
+- [x] **After Phase 5:** repo description updated (EKS, Terraform, Helm + Argo CD GitOps, Prometheus/Grafana SLOs, Slack via Alertmanager, External Secrets, GitHub Actions with OIDC, Trivy, Dependabot) and 12 topics added: alertmanager, argocd, aws, eks, external-secrets, gitops, grafana, helm, kubernetes, prometheus, slo, terraform. (Pasting all topics at once failed GitHub's validation; typing each one + Enter worked.)

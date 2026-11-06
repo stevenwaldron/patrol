@@ -9,7 +9,7 @@ metadata:
   name: aws-load-balancer-controller
   namespace: argocd
   annotations:
-    # Wave -1: installed and HEALTHY before Patrol (wave 0) starts.
+    # Wave -1: installed and HEALTHY before Patrol (wave 2) starts.
     argocd.argoproj.io/sync-wave: "-1"
   finalizers:
     - resources-finalizer.argocd.argoproj.io/foreground
