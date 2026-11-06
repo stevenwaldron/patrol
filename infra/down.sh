@@ -45,6 +45,49 @@ wait_for_load_balancers_gone() {
   exit 1
 }
 
+# Security groups the controller made for those load balancers (same tag). AWS
+# keeps a deleted load balancer's network interfaces for a few minutes, and
+# until they're gone these groups CAN'T be deleted; the controller retries in
+# the background. Found live (Nov 6): down.sh removed the controller once the
+# load balancer was gone but before that retry loop finished, so two groups
+# were orphaned and blocked the VPC from deleting.
+k8s_security_groups() {
+  aws ec2 describe-security-groups --profile "$PROFILE" --region "$REGION" \
+    --filters "Name=tag:elbv2.k8s.aws/cluster,Values=$CLUSTER" \
+    --query 'SecurityGroups[].GroupId' --output text
+}
+
+wait_for_security_groups_gone() {
+  echo "==> Waiting for the controller to delete its load balancer security groups"
+  for _ in $(seq 1 30); do
+    [[ -z "$(k8s_security_groups)" ]] && { echo "    removed"; return 0; }
+    sleep 10
+  done
+  echo "WARNING: load balancer security groups still exist after 5 minutes; removing them before the destroy." >&2
+}
+
+# Safety net before terraform destroy (e.g. the cluster API wasn't reachable):
+# delete any group with this cluster's tag ourselves, retrying while AWS still
+# reports a dependency (the network interfaces are still being released).
+# Only groups tagged elbv2.k8s.aws/cluster=patrol are touched. Two passes per
+# round, because one group can reference another.
+delete_k8s_security_groups() {
+  local sgs
+  for _ in $(seq 1 20); do
+    sgs=$(k8s_security_groups)
+    [[ -z "$sgs" ]] && return 0
+    echo "==> Deleting leftover load balancer security groups: $sgs"
+    for _pass in 1 2; do
+      for sg in $sgs; do
+        aws ec2 delete-security-group --profile "$PROFILE" --region "$REGION" --group-id "$sg" 2>/dev/null || true
+      done
+    done
+    [[ -z "$(k8s_security_groups)" ]] && return 0
+    sleep 15
+  done
+  echo "Could not delete: $(k8s_security_groups). terraform destroy will fail on the VPC; delete them in the EC2 console and rerun." >&2
+}
+
 argo() { kubectl --context "$CLUSTER" -n argocd "$@"; }
 
 # Patrol's public hostname (empty = no domain, nothing to wait for).
@@ -111,6 +154,7 @@ if kubectl --context "$CLUSTER" get namespaces >/dev/null 2>&1; then
   # 4. Only once AWS confirms the load balancers are gone AND ExternalDNS has
   #    removed the domain's records, remove the rest (controller, ExternalDNS).
   wait_for_load_balancers_gone
+  wait_for_security_groups_gone
   wait_for_dns_records_gone
   if kubectl --context "$CLUSTER" get crd applications.argoproj.io >/dev/null 2>&1; then
     # Reverse install order (highest sync wave first): an app is removed while the
@@ -134,6 +178,7 @@ fi
 
 # Again (cheap), in case the Kubernetes cleanup was skipped above.
 wait_for_load_balancers_gone
+delete_k8s_security_groups
 
 # The variable is required, but its value doesn't matter for a destroy.
 ip=$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]' || echo 203.0.113.1)
@@ -166,6 +211,7 @@ check "Elastic IPs" "$(aws ec2 describe-addresses --profile "$PROFILE" --region 
 check "VPC" "$(aws ec2 describe-vpcs --profile "$PROFILE" --region "$REGION" \
   --filters "Name=tag:Project,Values=patrol" "Name=tag:Layer,Values=cluster" --query 'Vpcs[].VpcId' --output text)"
 check "Kubernetes load balancers" "$(k8s_load_balancers)"
+check "Load balancer security groups" "$(k8s_security_groups)"
 if (( leftovers > 0 )); then
   echo "==> $leftovers leftover type(s) found. They may still be billing: check the console." >&2
 else

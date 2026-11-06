@@ -15,8 +15,8 @@ the `patrol` namespace, and to the Deployments, CronJobs and Jobs that create th
 Pod Security Admission (built into Kubernetes) enforces the "restricted" standard on
 the same namespace; these rules cover what it can't express.
 
-`validationActions`: **Audit** first (results in PolicyReports, nothing blocked),
-then **Deny** once the reports show Patrol passes.
+`validationActions`: ran in **Audit** first (results in PolicyReports, nothing blocked),
+now **Deny + Audit** (switched Nov 6, after the live reports showed Patrol passing all 22 policies).
 
 Tests: `kyverno test deploy/platform/policies/tests` (good and bad pods per rule),
 and CI runs every policy against the rendered Patrol chart.

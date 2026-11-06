@@ -7,9 +7,11 @@ metadata:
     policies.kyverno.io/description: >-
       Every container image must come from Patrol's own ECR repositories (419701112481.dkr.ecr.us-east-1.amazonaws.com/patrol/...). Blocks Docker Hub and any other registry, including look-alike names.
 spec:
-  # Audit: record results in PolicyReports, block nothing. Switched to Deny once
-  # the reports show Patrol passes (see the running log).
-  validationActions: [Audit]
+  # Deny: reject anything in the patrol namespace that breaks this rule. Ran in
+  # Audit first; the live PolicyReports showed every Patrol workload passing all
+  # 22 policies (Nov 6) before this was switched. Audit is also kept, so passes
+  # and failures keep appearing in PolicyReports.
+  validationActions: [Deny, Audit]
   failurePolicy: Ignore          # Pod Security Admission is the backstop
   matchConstraints:
     namespaceSelector:

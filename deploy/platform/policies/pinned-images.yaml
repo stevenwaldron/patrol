@@ -7,9 +7,11 @@ metadata:
     policies.kyverno.io/description: >-
       Every image tag must be the git commit ID it was built from (7-40 hex characters), or the image must be pinned by digest. Tags like latest can silently point at different images over time.
 spec:
-  # Audit: record results in PolicyReports, block nothing. Switched to Deny once
-  # the reports show Patrol passes (see the running log).
-  validationActions: [Audit]
+  # Deny: reject anything in the patrol namespace that breaks this rule. Ran in
+  # Audit first; the live PolicyReports showed every Patrol workload passing all
+  # 22 policies (Nov 6) before this was switched. Audit is also kept, so passes
+  # and failures keep appearing in PolicyReports.
+  validationActions: [Deny, Audit]
   failurePolicy: Ignore          # Pod Security Admission is the backstop
   matchConstraints:
     namespaceSelector:

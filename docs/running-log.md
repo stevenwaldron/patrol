@@ -584,14 +584,40 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 - *Symptom:* every app Healthy, including patrol-policies, policy-library and patrol (waves gate on health, so the deploy went through), but `kyverno` stayed **OutOfSync/Healthy**; `up.sh` waits for Synced + Healthy and stopped after 10 minutes, before its load balancer/DNS/HTTPS checks.
 - *Evidence:* exactly the **11 `policies.kyverno.io` CRDs** were out of sync; Kyverno's older `kyverno.io` CRDs were fine. Argo CD's diff: Git has `annotations: {}` and `labels: {}`; the cluster has neither.
 - *Cause:* those CRDs come from the chart's `kyverno-api` subchart, which writes empty maps (the older CRDs carry real labels). Kubernetes stores an empty map as nothing, so "{}" vs "missing" is a difference that can never resolve. Suspected from comparing the rendered CRDs, confirmed by the live diff before changing anything.
-- *Fix:* `ignoreDifferences` on the kyverno app for CRDs with `jqPathExpressions` `.metadata.labels | select(. == {})` and the same for annotations: ignored **only when empty**, so a real label or annotation in a future chart version is still compared. Tested the expressions: they select the path when the map is empty, and nothing when it's missing or has content. Rejected: ignoring all CRD metadata, or all differences on the app (would hide real drift).
+- *Fix:* `ignoreDifferences` on the kyverno app for CRDs with `jqPathExpressions` `.metadata.labels | select(. == {})` and the same for annotations: ignored **only when empty**, so a real label or annotation in a future chart version is still compared. Tested the expressions: they select the path when the map is empty, and nothing when it's missing or has content. Rejected: ignoring all CRD metadata, or all differences on the app (would hide real drift). *Verified live:* pushed `83b5658`; the root app applied the rule to the kyverno Application (checked with `kubectl … -o jsonpath='{.spec.ignoreDifferences}'`); after a refresh, kyverno **Synced + Healthy**.
 - *Positive from the same run:* the password move worked live: `Moving the Argo CD admin password out of the cluster`, then `secret "argocd-initial-admin-secret" deleted`; login used `pbcopy < ~/.patrol/argocd-admin-password`.
+
+**Live: Kyverno's verdict.** All 22 ValidatingPolicies `READY true`. PolicyReports in `patrol`: every Pod, Deployment, ReplicaSet and the scheduler CronJob **PASS 22, FAIL 0**, which is what CI predicted from the rendered chart.
+
+**Live: the cluster-wide audit** (library, audit-only), failures only in two namespaces:
+| Workload | Fails | Why it's expected |
+|---|---|---|
+| `aws-node` (VPC CNI) | 9–10 | programs the node's network: host network, privileged, host paths |
+| `kube-proxy` | 7 | node networking rules: host network, privileged |
+| `eks-pod-identity-agent` | 7–8 | serves credentials on the node's link-local address: host network |
+| `kps-prometheus-node-exporter` | 5–6 | reads the host's /proc and /sys: host PID/network, host paths |
+| `coredns` | 2 | EKS add-on defaults (seccomp/run-as-non-root not set by AWS) |
+| `aws-load-balancer-controller` | 1 | its chart doesn't set a seccomp profile |
+- By rule: restrict-seccomp-strict 20, require-run-as-nonroot 13, disallow-privilege-escalation 12, disallow-host-namespaces 12, then volume types / privileged / host path 9 each, host ports and capabilities 6 each.
+- **Clean:** Argo CD, External Secrets, Kyverno itself, Prometheus, Alertmanager, Grafana, kube-state-metrics, ExternalDNS, Patrol.
+- *Reading:* the node agents need host access by design; that's why the library audits cluster-wide instead of enforcing. Two findings are fixable by us: the load balancer controller's seccomp profile (our own Helm values) and possibly coredns (EKS add-on configuration). Logged as follow-ups, not changed mid-phase.
+
+**Patrol's 5 rules switched to Deny** (`validationActions: [Deny, Audit]`): Deny rejects violations at admission; Audit keeps writing results to PolicyReports. Valid per the Kubernetes semantics Kyverno's CEL policies follow (only Deny + Warn is disallowed). Switched only after the live reports showed 0 failures, so the switch can't break Patrol. Re-checked offline: 63/63 tests, Patrol's chart passes, kubeconform valid.
+
+**Bug (unattended teardown, Nov 6): `terraform destroy` failed on the VPC.**
+- *Symptom:* `down.sh`, run while Steven was away, ended with `DependencyViolation: The vpc 'vpc-…' has dependencies and cannot be deleted`. Everything else was already destroyed.
+- *Evidence (checked before deleting anything):* the VPC still held exactly two security groups besides `default`, both tagged `elbv2.k8s.aws/cluster=patrol`: `k8s-patrol-statuspa-…` (the status page load balancer's own group) and `k8s-traffic-patrol-…` (the controller's shared group for reaching pods). No network interfaces, no subnets. Nothing billing (security groups and an empty VPC are free).
+- *Cause:* a race in down.sh. AWS keeps a deleted load balancer's network interfaces for a few minutes, and until they're released the controller's security groups can't be deleted, so the controller retries in the background. down.sh waited only for the **load balancer** to disappear, then deleted the controller (with the remaining apps) while that retry loop was still running. Nobody was left to delete the two groups. It didn't happen in earlier teardowns, which suggests it depends on how quickly AWS releases the interfaces.
+- *Recovery:* deleted both groups by ID (`Return: true`), then reran down.sh (cluster API unreachable → straight to Terraform).
+- *Fix in down.sh:* (1) after the load balancers are gone, **wait up to 5 minutes for the controller's tagged security groups to disappear** before removing the controller; (2) safety net right before `terraform destroy`: delete any group tagged `elbv2.k8s.aws/cluster=patrol`, two passes per round (one group can reference the other), retrying for up to 5 minutes while AWS reports a dependency; only groups with that exact tag are touched; (3) "Load balancer security groups" added to the leftover check. Tested with a stand-in AWS CLI that refuses the first three deletes and makes one group depend on the other: both removed.
+- *Lesson:* "the load balancer is gone" isn't "everything the controller made is gone". Wait on every kind of resource a controller creates, not just the one you're thinking of. And check for each kind at the end.
 
 ---
 
 ## Reminders (open items)
 
 - [ ] **Base image digest:** bump `python:3.13-slim` in `app/Dockerfile` once it ships apt ≥ 3.0.4 (Dependabot's docker updates hit ECR Public's anonymous rate limit, so check by hand).
+- [ ] **Audit findings to fix:** set `seccompProfile: RuntimeDefault` for the AWS Load Balancer Controller (our Helm values); check whether the EKS coredns add-on configuration can set seccomp/run-as-non-root.
 - [ ] **Nightly re-scan** of the deployed images (a scan result is only as current as Trivy's database).
 - [ ] **Backstory for `1cd545d`** (Nov 4 Terraform fix): ask Steven what problem it solved, for the write-up.
 - [ ] **Repeatable builds:** consider a hashed lock file for transitive Python dependencies (botocore floated from 1.43.115 to 1.43.123 under the same requirements).
