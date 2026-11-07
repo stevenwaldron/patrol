@@ -30,6 +30,7 @@ env:
   KPS_CHART_VERSION: 92.17.0
   KYVERNO_VERSION: v1.19.2          # CLI = the Kyverno the cluster runs (chart 3.9.2)
   KYVERNO_CHART_VERSION: 3.9.2
+  KEDA_CHART_VERSION: 2.21.0
   # Schemas for custom resources (ServiceMonitor, PrometheusRule, ExternalSecret,
   # Argo CD Application...), so they get the same strict check as built-in ones.
   CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
@@ -213,6 +214,16 @@ jobs:
           grep -q -- '--forceFailurePolicyIgnore=true' kyverno.yaml \
             || { echo "Kyverno webhooks are not forced to failurePolicy Ignore" >&2; exit 1; }
           python3 deploy/monitoring/check_references.py kyverno.yaml
+      - name: KEDA chart renders with our settings
+        # Same checks for the autoscaler (lives in this job with the other
+        # platform-chart checks).
+        run: |
+          helm template keda keda --repo https://kedacore.github.io/charts \
+            --version "$KEDA_CHART_VERSION" --namespace keda \
+            -f deploy/platform/keda/values.yaml > keda.yaml
+          python3 deploy/monitoring/check_references.py keda.yaml
+          grep -q 'serviceAccountName: keda-operator' keda.yaml \
+            || { echo "KEDA operator no longer uses ServiceAccount keda-operator (Pod Identity association)" >&2; exit 1; }
 
   shell:
     runs-on: ubuntu-24.04

@@ -350,6 +350,58 @@
       ],
       "title": "Status page: requests per second, by code",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "KEDA reads the SQS queue every 15 s and targets 20 orders per worker, between 2 and 10 workers. Scale-up is immediate; scale-down waits 2 minutes after the backlog clears.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 9,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(keda_scaler_metrics_value{exported_namespace=\"patrol\", scaledObject=\"worker\"})",
+          "legendFormat": "orders waiting + in progress (what KEDA sees)",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(kube_deployment_status_replicas{namespace=\"patrol\", deployment=\"worker\"})",
+          "legendFormat": "workers",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"patrol\", horizontalpodautoscaler=\"keda-hpa-worker\"})",
+          "legendFormat": "max workers",
+          "refId": "C"
+        }
+      ],
+      "title": "Autoscaling: orders in the queue vs workers",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

@@ -1,0 +1,69 @@
+{{- if .Values.worker.autoscaling.enabled }}
+{{- $a := .Values.worker.autoscaling }}
+{{- if gt (int $a.minReplicas) (int $a.maxReplicas) }}
+{{- fail "worker.autoscaling.minReplicas must not exceed maxReplicas" }}
+{{- end }}
+{{- $c := dict "root" . "component" "worker" }}
+# How KEDA authenticates to AWS for this queue: the KEDA operator's own identity
+# (EKS Pod Identity -> role patrol-keda, allowed only sqs:GetQueueAttributes on
+# this queue). No keys anywhere.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: patrol-aws
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+spec:
+  podIdentity:
+    provider: aws
+---
+# KEDA reads the queue every pollingInterval and runs an HPA on the result:
+# workers = ceil(orders waiting + in progress / ordersPerWorker), clamped to
+# min..max.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: {{ $a.minReplicas }}
+  maxReplicaCount: {{ $a.maxReplicas }}
+  pollingInterval: {{ $a.pollingIntervalSeconds }}
+  # If KEDA can't read the queue 3 times in a row, hold the minimum instead of
+  # guessing (PatrolAutoscalerErrors alerts on the failures).
+  fallback:
+    failureThreshold: 3
+    replicas: {{ $a.minReplicas }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          # React at once to a backlog: up to 4 more workers every 30 s.
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 30
+        scaleDown:
+          # Remove at most 2 workers a minute, after the backlog has been gone
+          # for the stabilization window.
+          stabilizationWindowSeconds: {{ $a.scaleDownStabilizationSeconds }}
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: patrol-aws
+      metadata:
+        queueURL: {{ .Values.aws.queueUrl | quote }}
+        awsRegion: {{ .Values.aws.region | quote }}
+        queueLength: {{ $a.ordersPerWorker | quote }}
+        # Count orders being worked on too, so workers aren't removed while
+        # they're mid-check.
+        scaleOnInFlight: "true"
+{{- end }}

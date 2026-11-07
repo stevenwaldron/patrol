@@ -41,8 +41,27 @@ scheduler:
     limits: { memory: 192Mi }
 
 worker:
+  # Fixed copies when autoscaling is off. With autoscaling on, KEDA owns the
+  # count and the Deployment leaves `replicas` out (otherwise Argo CD and the
+  # autoscaler would fight over it forever).
   replicas: 2
   threads: 10
+  # KEDA scales the workers on the SQS queue's length (waiting + in-progress
+  # orders), not CPU: checks spend their time waiting on the network, so CPU
+  # never shows a backlog. Needs KEDA (deploy/argocd/apps/keda.yaml).
+  autoscaling:
+    enabled: true
+    # 2 keeps one worker per zone (topology spread) and the disruption budget
+    # meaningful; orders arrive every minute, so scale-to-zero buys nothing.
+    minReplicas: 2
+    maxReplicas: 10
+    # Target orders per worker. One worker runs `threads` (10) checks at a time,
+    # each up to ~10 s, so 20 queued is a couple of rounds of work.
+    ordersPerWorker: 20
+    pollingIntervalSeconds: 15
+    # Wait this long after the backlog clears before removing workers, so a
+    # bursty queue doesn't make the count flap.
+    scaleDownStabilizationSeconds: 120
   # Long poll (20 s) + slowest check must finish before Kubernetes force-stops the pod.
   terminationGracePeriodSeconds: 60
   resources:

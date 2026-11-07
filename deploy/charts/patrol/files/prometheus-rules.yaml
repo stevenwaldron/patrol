@@ -158,3 +158,17 @@ groups:
         annotations:
           summary: Prometheus cannot scrape any status page pod.
           description: Patrol's SLO and site alerts are blind until the status page is back.
+
+      # KEDA can't read the queue's length (e.g. its Pod Identity role or the
+      # queue changed). The ScaledObject's fallback holds the minimum number of
+      # workers, so a backlog would build up silently without this alert.
+      # KEDA's own `namespace` label arrives as exported_namespace (the scrape
+      # target's namespace, keda, wins).
+      - alert: PatrolAutoscalerErrors
+        expr: sum(increase(keda_scaler_detail_errors_total{exported_namespace="patrol", scaledObject="worker"}[10m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: KEDA can't read the patrol queue; workers are held at the minimum.
+          description: '{{ $value | humanize }} failed queue reads in the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
+

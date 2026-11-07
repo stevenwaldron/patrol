@@ -119,11 +119,12 @@ wait_for_app() {  # wait_for_app NAME TIMEOUT_SECONDS
 }
 
 # Waves: -2 External Secrets; -1 secrets, monitoring, load balancer controller,
-# ExternalDNS; 0 Kyverno; 1 policies; 2 Patrol. Each wave waits for the last.
+# ExternalDNS; 0 Kyverno, KEDA; 1 policies; 2 Patrol. Each wave waits for the last.
 echo "==> Waiting for Argo CD: platform (waves -2 to 0), policies (1), then Patrol (2)"
 wait_for_app aws-load-balancer-controller 600
 wait_for_app kube-prometheus-stack 900
 wait_for_app kyverno 600
+wait_for_app keda 600
 wait_for_app patrol-policies 600
 wait_for_app patrol 900
 apps_ready=$(date +%s)
@@ -223,6 +224,10 @@ Grafana (private: only through your own machine):
   then open http://localhost:3001   (dashboards: Patrol: overview, Patrol: SLOs and error budgets)
   User: admin. Password (generated in-cluster each rebuild; copy it, never screenshot it):
   kubectl --context $CLUSTER -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
+
+Worker autoscaling (KEDA scales 2-10 workers on the SQS queue's length):
+  kubectl --context $CLUSTER -n patrol get scaledobject,hpa
+  ./infra/load-test.sh     # a 5-minute burst of fake orders to watch it scale
 
 Kyverno policy results (Patrol's own rules, then the cluster-wide audit):
   kubectl --context $CLUSTER -n patrol get policyreports

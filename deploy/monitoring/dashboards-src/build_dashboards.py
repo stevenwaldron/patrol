@@ -80,6 +80,17 @@ patrol = dashboard(
         panel(8, "Status page: requests per second, by code", "timeseries", 12, 21, 12, 8,
               [('sum by (code) (rate(patrol_http_requests_total[5m]))', "{{code}}")], unit="reqps",
               desc="Real visitor requests only (probes and /metrics excluded)."),
+        # KEDA's metric carries its own `namespace` label; Prometheus keeps the
+        # scrape target's (keda) and renames KEDA's to exported_namespace.
+        panel(9, "Autoscaling: orders in the queue vs workers", "timeseries", 0, 29, 24, 9,
+              [('max(keda_scaler_metrics_value{exported_namespace="patrol", scaledObject="worker"})',
+                "orders waiting + in progress (what KEDA sees)"),
+               ('max(kube_deployment_status_replicas{namespace="patrol", deployment="worker"})', "workers"),
+               ('max(kube_horizontalpodautoscaler_spec_max_replicas{namespace="patrol", horizontalpodautoscaler="keda-hpa-worker"})',
+                "max workers")],
+              unit="short",
+              desc="KEDA reads the SQS queue every 15 s and targets 20 orders per worker, between 2 and 10 workers. "
+                   "Scale-up is immediate; scale-down waits 2 minutes after the backlog clears."),
     ])
 
 slo = dashboard(

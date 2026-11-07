@@ -1,0 +1,32 @@
+# KEDA 2.21.0 (chart 2.21.0) settings, applied by deploy/argocd/apps/keda.yaml.
+# KEDA reads the SQS queue's length and scales Patrol's workers (the
+# ScaledObject lives in Patrol's chart: templates/autoscaling.yaml).
+
+# The operator's AWS identity: EKS Pod Identity association for
+# keda/keda-operator -> role patrol-keda (infra/permanent/iam-pod-roles.tf),
+# allowed only sqs:GetQueueAttributes on the patrol queue.
+serviceAccount:
+  operator:
+    create: true
+    name: keda-operator
+
+# Lab sizing (chart default limits are 1 CPU / 1000Mi each, far above need).
+resources:
+  operator:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { memory: 256Mi }
+  metricServer:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { memory: 256Mi }
+  webhooks:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits: { memory: 128Mi }
+
+# Operator metrics (keda_scaler_metrics_value = the queue length KEDA sees,
+# keda_scaler_detail_errors_total = failed reads) into Prometheus; the alert and
+# dashboard panel are in Patrol's chart.
+prometheus:
+  operator:
+    enabled: true
+    serviceMonitor:
+      enabled: true

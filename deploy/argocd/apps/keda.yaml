@@ -1,0 +1,52 @@
+# KEDA (chart 2.21.0 = KEDA 2.21.0): event-driven autoscaling. Scales Patrol's
+# workers on the SQS queue's length instead of CPU (checks spend their time
+# waiting on the network, so CPU never shows the backlog).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keda
+  namespace: argocd
+  annotations:
+    # Wave 0, alongside Kyverno: its ServiceMonitor needs the monitoring stack's
+    # CRDs (wave -1), and Patrol's ScaledObject (wave 2) needs KEDA's CRDs.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: default
+  sources:
+    - repoURL: https://kedacore.github.io/charts
+      chart: keda
+      targetRevision: 2.21.0
+      helm:
+        releaseName: keda
+        valueFiles:
+          - $values/deploy/platform/keda/values.yaml
+    - repoURL: https://github.com/stevenwaldron/patrol.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keda
+  # KEDA's operator generates its own TLS certificate at startup and writes the
+  # CA into its APIService and admission webhook (caBundle). That field isn't in
+  # the chart, so without these rules Argo CD would report KEDA OutOfSync forever
+  # (the same class of problem as Kyverno's CRDs in Phase 6). Only caBundle is
+  # ignored. RespectIgnoreDifferences keeps a sync from touching it either.
+  ignoreDifferences:
+    - group: apiregistration.k8s.io
+      kind: APIService
+      jsonPointers:
+        - /spec/caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[].clientConfig.caBundle
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # KEDA's CRDs are too large for client-side apply
+      - RespectIgnoreDifferences=true

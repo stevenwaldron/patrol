@@ -189,3 +189,26 @@ tests:
               summary: Sites are not being checked on time; the freshness error budget is burning fast.
               description: 'Stale share over 1h is 22.5% (SLO allows 1%).'
 
+  # 10. KEDA failing to read the queue alerts after 5 minutes of errors; a
+  #     healthy autoscaler (counter flat) never alerts.
+  - interval: 1m
+    input_series:
+      - series: 'keda_scaler_detail_errors_total{namespace="keda", exported_namespace="patrol", scaledObject="worker", scaler="awsSqsQueueScaler"}'
+        values: '0x5 0+4x30'          # healthy for 5 min, then 4 failed reads a minute
+      - series: 'keda_scaler_detail_errors_total{namespace="keda", exported_namespace="other", scaledObject="worker", scaler="awsSqsQueueScaler"}'
+        values: '0+4x35'              # another namespace's autoscaler: not ours
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PatrolAutoscalerErrors
+        exp_alerts: []
+      - eval_time: 9m                 # errors since 6m: condition true, 5m "for" not over yet
+        alertname: PatrolAutoscalerErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PatrolAutoscalerErrors
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: KEDA can't read the patrol queue; workers are held at the minimum.
+              description: '40 failed queue reads in the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
+

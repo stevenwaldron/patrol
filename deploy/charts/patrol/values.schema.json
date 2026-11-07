@@ -1,29 +1,67 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["expectedNamespace", "image", "aws", "sites", "scheduler", "worker", "statusPage", "ingress", "monitoring"],
+  "required": [
+    "expectedNamespace",
+    "image",
+    "aws",
+    "sites",
+    "scheduler",
+    "worker",
+    "statusPage",
+    "ingress",
+    "monitoring"
+  ],
   "properties": {
-    "expectedNamespace": { "type": "string", "minLength": 1 },
+    "expectedNamespace": {
+      "type": "string",
+      "minLength": 1
+    },
     "image": {
       "type": "object",
-      "required": ["registry", "tag", "pullPolicy"],
+      "required": [
+        "registry",
+        "tag",
+        "pullPolicy"
+      ],
       "properties": {
-        "registry": { "type": "string", "pattern": "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com$" },
+        "registry": {
+          "type": "string",
+          "pattern": "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com$"
+        },
         "tag": {
           "type": "string",
           "description": "Git commit ID (7 to 40 lowercase hex characters). Empty is caught by the templates with a clearer message.",
           "pattern": "^([0-9a-f]{7,40})?$"
         },
-        "pullPolicy": { "enum": ["IfNotPresent", "Always"] }
+        "pullPolicy": {
+          "enum": [
+            "IfNotPresent",
+            "Always"
+          ]
+        }
       }
     },
     "aws": {
       "type": "object",
-      "required": ["region", "queueUrl", "tableName"],
+      "required": [
+        "region",
+        "queueUrl",
+        "tableName"
+      ],
       "properties": {
-        "region": { "type": "string", "pattern": "^[a-z]{2}-[a-z]+-[0-9]$" },
-        "queueUrl": { "type": "string", "pattern": "^https://sqs\\.[a-z0-9-]+\\.amazonaws\\.com/[0-9]{12}/[A-Za-z0-9_-]+$" },
-        "tableName": { "type": "string", "minLength": 3 }
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+        },
+        "queueUrl": {
+          "type": "string",
+          "pattern": "^https://sqs\\.[a-z0-9-]+\\.amazonaws\\.com/[0-9]{12}/[A-Za-z0-9_-]+$"
+        },
+        "tableName": {
+          "type": "string",
+          "minLength": 3
+        }
       }
     },
     "sites": {
@@ -31,60 +69,187 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "name", "url"],
+        "required": [
+          "id",
+          "name",
+          "url"
+        ],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
-          "name": { "type": "string", "minLength": 1 },
-          "url": { "type": "string", "pattern": "^https?://" },
-          "timeout_seconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 30 }
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https?://"
+          },
+          "timeout_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 30
+          }
         }
       }
     },
     "scheduler": {
       "type": "object",
-      "required": ["schedule", "activeDeadlineSeconds", "resources"],
+      "required": [
+        "schedule",
+        "activeDeadlineSeconds",
+        "resources"
+      ],
       "properties": {
-        "schedule": { "type": "string" },
-        "activeDeadlineSeconds": { "type": "integer", "minimum": 10, "maximum": 59 }
+        "schedule": {
+          "type": "string"
+        },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 59
+        }
       }
     },
     "worker": {
       "type": "object",
-      "required": ["replicas", "threads", "terminationGracePeriodSeconds", "resources"],
+      "required": [
+        "replicas",
+        "threads",
+        "terminationGracePeriodSeconds",
+        "resources",
+        "autoscaling"
+      ],
       "properties": {
-        "replicas": { "type": "integer", "minimum": 1 },
-        "threads": { "type": "integer", "minimum": 1, "maximum": 50 },
-        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30 }
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "threads": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 30
+        },
+        "autoscaling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "minReplicas",
+            "maxReplicas",
+            "ordersPerWorker",
+            "pollingIntervalSeconds",
+            "scaleDownStabilizationSeconds"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "minReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "ordersPerWorker": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "pollingIntervalSeconds": {
+              "type": "integer",
+              "minimum": 5,
+              "maximum": 300
+            },
+            "scaleDownStabilizationSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            }
+          }
+        }
       }
     },
     "statusPage": {
       "type": "object",
-      "required": ["replicas", "terminationGracePeriodSeconds", "preStopSleepSeconds", "resources"],
+      "required": [
+        "replicas",
+        "terminationGracePeriodSeconds",
+        "preStopSleepSeconds",
+        "resources"
+      ],
       "properties": {
-        "replicas": { "type": "integer", "minimum": 1 },
-        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 10 },
-        "preStopSleepSeconds": { "type": "integer", "minimum": 0 }
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 10
+        },
+        "preStopSleepSeconds": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "monitoring": {
       "type": "object",
-      "required": ["enabled", "scrapeInterval"],
+      "required": [
+        "enabled",
+        "scrapeInterval"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "scrapeInterval": { "type": "string", "pattern": "^[0-9]+[sm]$" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "scrapeInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+[sm]$"
+        }
       }
     },
     "ingress": {
       "type": "object",
-      "required": ["enabled", "className", "loadBalancerName", "deregistrationDelaySeconds"],
+      "required": [
+        "enabled",
+        "className",
+        "loadBalancerName",
+        "deregistrationDelaySeconds"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "className": { "type": "string" },
-        "loadBalancerName": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,32}$" },
-        "host": { "type": "string", "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$|^$" },
-        "sslPolicy": { "type": "string", "pattern": "^ELBSecurityPolicy-" },
-        "deregistrationDelaySeconds": { "type": "integer", "minimum": 0, "maximum": 3600 }
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "loadBalancerName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{1,32}$"
+        },
+        "host": {
+          "type": "string",
+          "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$|^$"
+        },
+        "sslPolicy": {
+          "type": "string",
+          "pattern": "^ELBSecurityPolicy-"
+        },
+        "deregistrationDelaySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        }
       }
     }
   }

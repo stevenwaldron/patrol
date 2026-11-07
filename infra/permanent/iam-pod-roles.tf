@@ -43,6 +43,11 @@ locals {
       service_account = "external-secrets"
       description     = "External Secrets Operator: read the Slack webhook for Alertmanager"
     }
+    keda = {
+      namespace       = "keda"
+      service_account = "keda-operator"
+      description     = "KEDA operator: read the patrol queue's length to scale the workers"
+    }
   }
 
   # Least privilege: each workload gets exactly the actions its code calls.
@@ -113,6 +118,20 @@ locals {
     # From the ESO "EKS Pod Identity" guide, narrowed from Resource "*" to the one
     # secret Patrol needs. (Secrets Manager ARNs end in a random suffix; the
     # Terraform-known ARN includes it, so no wildcard is needed.)
+    # KEDA only needs the queue's length (GetQueueAttributes): it can't read,
+    # send or delete orders. KEDA 2.21 with `podIdentity.provider: aws` uses the
+    # operator pod's own AWS credentials (checked in its AWS scaler source,
+    # pkg/scalers/aws), which EKS Pod Identity supplies.
+    keda = jsonencode({
+      Version = "2012-10-17"
+      Statement = [{
+        Sid      = "ReadPatrolQueueLength"
+        Effect   = "Allow"
+        Action   = ["sqs:GetQueueAttributes"]
+        Resource = aws_sqs_queue.checks.arn
+      }]
+    })
+
     external-secrets = jsonencode({
       Version = "2012-10-17"
       Statement = [{
