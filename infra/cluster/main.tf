@@ -31,7 +31,7 @@ module "vpc" {
   }
   private_subnet_tags = {
     "kubernetes.io/role/internal-elb" = "1"
-    "karpenter.sh/discovery"          = var.cluster_name # used later by Karpenter (Phase 9)
+    "karpenter.sh/discovery"          = var.cluster_name # Karpenter launches nodes here
   }
 }
 
@@ -87,6 +87,12 @@ module "eks" {
   # "api" is left off: very chatty, and CloudWatch bills per GB ingested.
   enabled_log_types                      = ["audit", "authenticator"]
   cloudwatch_log_group_retention_in_days = 7
+
+  # Karpenter puts its nodes in the same security group as the managed nodes
+  # (found by this tag), so they reach the control plane and each other.
+  node_security_group_tags = {
+    "karpenter.sh/discovery" = var.cluster_name
+  }
 
   addons = {
     # Prefix delegation: nodes get /28 blocks (16 IPs) instead of single IPs,

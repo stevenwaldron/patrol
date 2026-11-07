@@ -121,7 +121,8 @@
         "threads",
         "terminationGracePeriodSeconds",
         "resources",
-        "autoscaling"
+        "autoscaling",
+        "nodePool"
       ],
       "properties": {
         "replicas": {
@@ -176,6 +177,10 @@
               "maximum": 3600
             }
           }
+        },
+        "nodePool": {
+          "type": "string",
+          "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
         }
       }
     },

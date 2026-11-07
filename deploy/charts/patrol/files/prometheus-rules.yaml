@@ -172,3 +172,15 @@ groups:
           summary: KEDA can't read the patrol queue; workers are held at the minimum.
           description: '{{ $value | humanize }} failed queue reads in the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
 
+      # Workers that can't be placed: Karpenter couldn't launch a node (no
+      # Spot or On-Demand capacity for the allowed types, the 8 vCPU limit
+      # reached, an IAM or tag problem) or the pool is misconfigured. The queue
+      # backs up quietly behind them otherwise.
+      - alert: PatrolWorkersPending
+        expr: sum(kube_pod_status_phase{namespace="patrol", pod=~"worker-.*", phase="Pending"}) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Patrol workers have been waiting for a node for 10 minutes.
+          description: '{{ $value | humanize }} worker pod(s) Pending. Check `kubectl -n patrol describe pod` and the Karpenter controller logs (kube-system).'
+

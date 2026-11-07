@@ -402,6 +402,49 @@
       ],
       "title": "Autoscaling: orders in the queue vs workers",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Nodes Karpenter runs for the workers (Spot first, On-Demand if no Spot). It adds a node when workers don't fit and removes or repacks nodes a minute after they're empty or underused. Capped at 8 vCPU (4 small nodes).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 10,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "count by (capacity_type) (karpenter_nodes_allocatable{nodepool=\"workers\", resource_type=\"cpu\"})",
+          "legendFormat": "{{capacity_type}} nodes",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(kube_deployment_status_replicas{namespace=\"patrol\", deployment=\"worker\"})",
+          "legendFormat": "workers",
+          "refId": "B"
+        }
+      ],
+      "title": "Karpenter: worker nodes by capacity type",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

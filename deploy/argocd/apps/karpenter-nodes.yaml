@@ -1,0 +1,27 @@
+# The worker node pool and how its nodes are built (deploy/platform/karpenter-nodes).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: karpenter-nodes
+  namespace: argocd
+  annotations:
+    # Wave 1: needs Karpenter's CRDs (wave 0). Argo CD's built-in health checks
+    # mark the EC2NodeClass Healthy only once Karpenter has resolved its AMI,
+    # subnets, security group and instance profile, so a tag or IAM mistake
+    # shows as Degraded and Patrol (wave 2) waits instead of its workers
+    # sitting Pending with nowhere to run.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/stevenwaldron/patrol.git
+    targetRevision: main
+    path: deploy/platform/karpenter-nodes
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

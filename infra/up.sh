@@ -51,6 +51,14 @@ if [[ -n "$DOMAIN" ]]; then
   echo "==> Certificate for ${DOMAIN} is ISSUED"
 fi
 
+# Spot needs an account-wide service-linked role that exists only once Spot has
+# been used. Karpenter's own policy can't create it (deliberately narrow), so
+# create it here once; later runs find it and skip. Account-wide and free.
+if ! aws iam get-role --profile "$PROFILE" --role-name AWSServiceRoleForEC2Spot >/dev/null 2>&1; then
+  echo "==> Creating the EC2 Spot service-linked role (first Spot use in this account)"
+  aws iam create-service-linked-role --profile "$PROFILE" --aws-service-name spot.amazonaws.com >/dev/null
+fi
+
 AWS_PROFILE=$PROFILE terraform init -input=false
 AWS_PROFILE=$PROFILE terraform apply -var "admin_cidrs=[\"${ip}/32\"]"
 
@@ -119,12 +127,15 @@ wait_for_app() {  # wait_for_app NAME TIMEOUT_SECONDS
 }
 
 # Waves: -2 External Secrets; -1 secrets, monitoring, load balancer controller,
-# ExternalDNS; 0 Kyverno, KEDA; 1 policies; 2 Patrol. Each wave waits for the last.
+# ExternalDNS; 0 Kyverno, KEDA, Karpenter; 1 policies, worker node pool;
+# 2 Patrol. Each wave waits for the last.
 echo "==> Waiting for Argo CD: platform (waves -2 to 0), policies (1), then Patrol (2)"
 wait_for_app aws-load-balancer-controller 600
 wait_for_app kube-prometheus-stack 900
 wait_for_app kyverno 600
 wait_for_app keda 600
+wait_for_app karpenter 600
+wait_for_app karpenter-nodes 600
 wait_for_app patrol-policies 600
 wait_for_app patrol 900
 apps_ready=$(date +%s)
@@ -225,8 +236,10 @@ Grafana (private: only through your own machine):
   User: admin. Password (generated in-cluster each rebuild; copy it, never screenshot it):
   kubectl --context $CLUSTER -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
 
-Worker autoscaling (KEDA scales 2-10 workers on the SQS queue's length):
+Worker autoscaling (KEDA scales 2-10 workers on the SQS queue's length;
+Karpenter adds and removes the Spot nodes they run on):
   kubectl --context $CLUSTER -n patrol get scaledobject,hpa
+  kubectl --context $CLUSTER get nodeclaims,nodes -L karpenter.sh/capacity-type,node.kubernetes.io/instance-type
   ./infra/load-test.sh     # a 5-minute burst of fake orders to watch it scale
 
 Kyverno policy results (Patrol's own rules, then the cluster-wide audit):

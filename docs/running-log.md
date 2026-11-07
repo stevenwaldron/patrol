@@ -673,6 +673,57 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 
 ---
 
+## Phase 8: node autoscaling (Karpenter)
+
+**Order changed (approved):** Karpenter before the failure drills, so the drills test the finished system (Phase 8 Karpenter, Phase 9 drills, Phase 10 write-up). **Decisions approved:** A = Spot first with On-Demand fallback, for the workers; B = workers move onto Karpenter nodes; C = 8 vCPU cap on Karpenter nodes.
+
+**Version: Karpenter 1.15.1** (tag 2026-10-23). Karpenter's compatibility table: Kubernetes 1.36 needs ≥ 1.13; 1.37 is supported only by 1.15.x, so 1.15 also covers the next EKS upgrade. 1.15 upgrade notes checked: metric label changes and a new alpha gate; nothing affecting a fresh install.
+- **Surprise:** the source at tag v1.15.1 still says chart version 1.14.1; the release pipeline stamps the chart version and image digest when it publishes to the OCI registry (`hack/release/common.sh`). Rendered locally from source (same templates), and CI renders the **published** 1.15.1 chart. My sandbox can't reach public.ecr.aws; GitHub's runners can.
+- Argo CD installs it from Karpenter's public OCI registry. The form Argo CD v3.5.6's docs give is the registry path without `oci://` plus the chart name; no repository secret needed for a public chart.
+
+**Design: two kinds of capacity.** The managed node group (2× t3.medium, On-Demand) keeps the platform *and Karpenter itself* (the chart's affinity keeps it off Karpenter's own nodes). The new `workers` NodePool runs only Patrol's workers: a `patrol.io/pool=workers:NoSchedule` taint, and the worker chart (0.5.0, `worker.nodePool`) adds the matching node selector and toleration. DaemonSets (network, kube-proxy, Pod Identity agent, node-exporter) tolerate everything. Rejected: Karpenter for every node (Karpenter can't run on nodes it manages, and platform pods are better on stable On-Demand capacity); Karpenter only as overflow behind the fixed nodes (blurs the story; Spot savings never apply).
+- **Spot is safe for workers specifically:** an order a worker didn't finish isn't deleted from SQS, so it reappears and another worker takes it. The status page (serving visitors) stays On-Demand.
+
+**AWS side, in the cluster layer** (`infra/cluster/karpenter.tf`), via the EKS module's own Karpenter submodule at the same pinned version (same package, no new provider; the lock file doesn't change). Unlike the other Pod Identity roles (permanent layer): everything here is tied to one cluster and rebuilt with it.
+- Controller role `patrol-karpenter` (Pod Identity, `kube-system/karpenter`). **Policy audited against Karpenter 1.15.1's reference CloudFormation policy:** every action it needs is present, scoped to this cluster's tags; the only one missing, `ec2:RebootInstances`, belongs to an alpha feature gate we don't enable.
+- Interruption queue `patrol-karpenter` + 5 EventBridge rules (Spot interruption, rebalance, instance state, health, capacity-reservation): the 2-minute Spot warning reaches Karpenter, which starts a replacement and drains the node.
+- Node role `patrol-karpenter-node` + **instance profile created by Terraform** and named in the EC2NodeClass. Decision: Karpenter never creates instance profiles itself, so teardown has nothing to miss (an instance profile still holding the role would block deleting it).
+- The SSM managed policy on the node role: Session Manager access to a node in the drills, without SSH keys or open ports.
+- Node security group tagged `karpenter.sh/discovery=patrol` (the private subnets already had it, added in Phase 1 for this).
+- Expected cluster plan: **82 to add** (59 + 23 Karpenter resources).
+- **Spot service-linked role:** Spot needs an account-wide service-linked role that exists only after first use, and Karpenter's narrow policy can't create it. `up.sh` creates it once if missing (idempotent).
+
+**NodePool `workers` / EC2NodeClass `workers`** (`deploy/platform/karpenter-nodes`, Argo CD app wave 1):
+- capacity type `[spot, on-demand]`: Karpenter picks the cheapest available offering, i.e. Spot when it exists, On-Demand otherwise
+- t3/t3a, 2 vCPU, 2 GiB (t3.small / t3a.small), amd64
+- **limit 8 vCPU** (4 nodes)
+- consolidation `WhenEmptyOrUnderutilized` after 1 m, at most 1 node disrupted at a time
+- nodes replaced after 7 days
+- AL2023 `@latest` AMI (trade-off: not pinned; nodes live one session at most)
+- IMDSv2 required with hop limit 1, as on the managed nodes
+- encrypted 20 GiB gp3 root volume
+- Sizing math: a t3.small allows 11 pods (its network-interface limit; Karpenter doesn't assume prefix delegation), minus 4 DaemonSet pods = **~7 workers per node**, so 2 workers need 1 node and a 10-worker burst needs 2.
+- **`preferencePolicy: Ignore`:** the workers only *prefer* to spread across zones. With Karpenter's default ("Respect") it would launch a node per zone just for 2 idle workers. Ignore = one Spot node at rest. Trade-off: at rest both workers may share one Spot node; an interruption pauses checking for about a minute (orders wait in SQS; the freshness alert allows 3 minutes). To be tested in the drills.
+- Argo CD's built-in health checks (v3.5.6) for NodePool and EC2NodeClass use their Ready condition. A tag, AMI or IAM mistake shows as **Degraded** and Patrol (wave 2) waits, instead of workers sitting Pending with nowhere to run.
+- Validation: both manifests against Karpenter's own v1 CRDs, plus strictly against the datree catalog. **Surprise:** schemas I extracted from the CRDs myself didn't reject unknown fields (`consolidateAftr` passed); the catalog's do. CI uses the catalog.
+
+**Karpenter chart settings:** 1 replica (lab; if it's down, existing nodes keep running, only new nodes wait); requests 100m / 384 MiB, limit 768 MiB (Karpenter's docs suggest 1 CPU / 1 GiB for large clusters; to measure live, after the Phase 5 Argo CD OOM lesson); ServiceMonitor on. The chart renders its ServiceMonitor only if the monitoring CRDs exist (`.Capabilities.APIVersions`); Argo CD passes the cluster's API versions, and CI passes `--api-versions monitoring.coreos.com/v1` to match.
+
+**Monitoring:**
+- **PatrolWorkersPending** (warning, 10 min): workers waiting for a node. That covers no Spot or On-Demand capacity, the 8 vCPU limit reached, or an IAM/tag problem. Unit test 11: a 2-minute Pending during scale-up never alerts; a stuck worker does; a non-worker Pending pod doesn't count. Mutation-tested (dropping the worker filter, shortening `for`): both caught; 60/60 stable.
+- Overview panel 10: Karpenter worker nodes by capacity type, next to the worker count. Metric and labels checked in Karpenter's core at v1.15.1: `karpenter_nodes_allocatable`, with well-known labels turned into snake_case (`capacity_type`, `nodepool`).
+
+**Teardown designed in from the start** (the load balancer lesson): Karpenter's nodes and launch templates are unknown to Terraform. `down.sh` now:
+1. deletes the `karpenter-nodes` app while Karpenter still runs (it drains and terminates its own nodes)
+2. waits up to 5 min for instances tagged `karpenter.sh/nodepool` + `eks:eks-cluster-name=patrol` to be gone
+3. as a safety net before `terraform destroy`, terminates any that remain (waiting for termination) and deletes launch templates tagged for this cluster
+
+The leftover check gained "Karpenter nodes" and "Karpenter launch templates". Tag keys checked in Karpenter's source (`eks:eks-cluster-name` on instances and launch templates). Tested with a stand-in AWS CLI.
+
+**CI:** the published Karpenter chart rendered from its OCI registry with our values; reference check; asserts the ServiceAccount (`karpenter`, which the Pod Identity association depends on), the interruption queue, and the ServiceMonitor. The node pool manifests are now part of the platform validation. Risk noted: anonymous pulls from ECR Public can be rate-limited (Dependabot's docker updates hit that); a rare red there means "retry", not "broken".
+
+---
+
 ## Reminders (open items)
 
 - [ ] **Base image digest:** bump `python:3.13-slim` in `app/Dockerfile` once it ships apt ≥ 3.0.4 (Dependabot's docker updates hit ECR Public's anonymous rate limit, so check by hand).

@@ -91,6 +91,14 @@ patrol = dashboard(
               unit="short",
               desc="KEDA reads the SQS queue every 15 s and targets 20 orders per worker, between 2 and 10 workers. "
                    "Scale-up is immediate; scale-down waits 2 minutes after the backlog clears."),
+        panel(10, "Karpenter: worker nodes by capacity type", "timeseries", 0, 38, 24, 8,
+              [('count by (capacity_type) (karpenter_nodes_allocatable{nodepool="workers", resource_type="cpu"})',
+                "{{capacity_type}} nodes"),
+               ('max(kube_deployment_status_replicas{namespace="patrol", deployment="worker"})', "workers")],
+              unit="short",
+              desc="Nodes Karpenter runs for the workers (Spot first, On-Demand if no Spot). "
+                   "It adds a node when workers don't fit and removes or repacks nodes a minute after they're "
+                   "empty or underused. Capped at 8 vCPU (4 small nodes)."),
     ])
 
 slo = dashboard(

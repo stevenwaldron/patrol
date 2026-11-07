@@ -212,3 +212,28 @@ tests:
               summary: KEDA can't read the patrol queue; workers are held at the minimum.
               description: '40 failed queue reads in the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
 
+  # 11. Workers stuck Pending (no node for them) alert after 10 minutes; a
+  #     worker that's Pending briefly while its node starts never does.
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_status_phase{namespace="patrol", pod="worker-abc-1", phase="Pending"}'
+        values: '0 1 1 0x30'          # pending 2 minutes during a scale-up, then placed
+      - series: 'kube_pod_status_phase{namespace="patrol", pod="worker-abc-2", phase="Pending"}'
+        values: '0x5 1x30'            # from 5m: never placed
+      - series: 'kube_pod_status_phase{namespace="patrol", pod="status-page-x", phase="Pending"}'
+        values: '1x35'                # not a worker: another alert's business
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: PatrolWorkersPending
+        exp_alerts: []
+      - eval_time: 14m                # pending 9 minutes: not yet
+        alertname: PatrolWorkersPending
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: PatrolWorkersPending
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Patrol workers have been waiting for a node for 10 minutes.
+              description: '1 worker pod(s) Pending. Check `kubectl -n patrol describe pod` and the Karpenter controller logs (kube-system).'
+

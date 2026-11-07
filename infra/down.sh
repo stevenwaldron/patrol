@@ -88,6 +88,51 @@ delete_k8s_security_groups() {
   echo "Could not delete: $(k8s_security_groups). terraform destroy will fail on the VPC; delete them in the EC2 console and rerun." >&2
 }
 
+# Nodes and launch templates Karpenter created (Phase 8). Like the load
+# balancers, Terraform doesn't know they exist: if the cluster went first they'd
+# keep billing, and the instances would block deleting the subnets and VPC.
+karpenter_instances() {
+  aws ec2 describe-instances --profile "$PROFILE" --region "$REGION" \
+    --filters "Name=tag:eks:eks-cluster-name,Values=$CLUSTER" "Name=tag-key,Values=karpenter.sh/nodepool" \
+              "Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down" \
+    --query 'Reservations[].Instances[].InstanceId' --output text
+}
+
+karpenter_launch_templates() {
+  aws ec2 describe-launch-templates --profile "$PROFILE" --region "$REGION" \
+    --filters "Name=tag:eks:eks-cluster-name,Values=$CLUSTER" \
+    --query 'LaunchTemplates[].LaunchTemplateId' --output text
+}
+
+wait_for_karpenter_instances_gone() {
+  echo "==> Waiting for Karpenter to terminate its nodes"
+  for _ in $(seq 1 30); do
+    [[ -z "$(karpenter_instances)" ]] && { echo "    terminated"; return 0; }
+    sleep 10
+  done
+  echo "WARNING: Karpenter nodes still running after 5 minutes; terminating them before the destroy." >&2
+}
+
+# Safety net before terraform destroy (e.g. the cluster API wasn't reachable,
+# so Karpenter never got to clean up): terminate instances tagged as Karpenter
+# nodes of THIS cluster, wait until they're gone, then delete its launch
+# templates. Only resources with both tags are touched.
+cleanup_karpenter_leftovers() {
+  local ids lts
+  ids=$(karpenter_instances)
+  if [[ -n "$ids" ]]; then
+    echo "==> Terminating leftover Karpenter nodes: $ids"
+    # shellcheck disable=SC2086  # one argument per instance ID
+    aws ec2 terminate-instances --profile "$PROFILE" --region "$REGION" --instance-ids $ids >/dev/null
+    # shellcheck disable=SC2086
+    aws ec2 wait instance-terminated --profile "$PROFILE" --region "$REGION" --instance-ids $ids
+  fi
+  lts=$(karpenter_launch_templates)
+  for lt in $lts; do
+    aws ec2 delete-launch-template --profile "$PROFILE" --region "$REGION" --launch-template-id "$lt" >/dev/null || true
+  done
+}
+
 argo() { kubectl --context "$CLUSTER" -n argocd "$@"; }
 
 # Patrol's public hostname (empty = no domain, nothing to wait for).
@@ -156,6 +201,13 @@ if kubectl --context "$CLUSTER" get namespaces >/dev/null 2>&1; then
   wait_for_load_balancers_gone
   wait_for_security_groups_gone
   wait_for_dns_records_gone
+  # 5. The worker node pool, while Karpenter still runs: deleting the NodePool
+  #    makes Karpenter drain and terminate its own nodes (nothing else can).
+  if argo get applications.argoproj.io karpenter-nodes >/dev/null 2>&1; then
+    echo "==> Deleting the worker node pool (Karpenter terminates its nodes)"
+    argo delete applications.argoproj.io karpenter-nodes --wait=true --timeout=5m || true
+  fi
+  wait_for_karpenter_instances_gone
   if kubectl --context "$CLUSTER" get crd applications.argoproj.io >/dev/null 2>&1; then
     # Reverse install order (highest sync wave first): an app is removed while the
     # apps it depends on still run. E.g. platform-secrets (wave -1) goes before
@@ -179,6 +231,7 @@ fi
 # Again (cheap), in case the Kubernetes cleanup was skipped above.
 wait_for_load_balancers_gone
 delete_k8s_security_groups
+cleanup_karpenter_leftovers
 
 # The variable is required, but its value doesn't matter for a destroy.
 ip=$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]' || echo 203.0.113.1)
@@ -212,6 +265,8 @@ check "VPC" "$(aws ec2 describe-vpcs --profile "$PROFILE" --region "$REGION" \
   --filters "Name=tag:Project,Values=patrol" "Name=tag:Layer,Values=cluster" --query 'Vpcs[].VpcId' --output text)"
 check "Kubernetes load balancers" "$(k8s_load_balancers)"
 check "Load balancer security groups" "$(k8s_security_groups)"
+check "Karpenter nodes" "$(karpenter_instances)"
+check "Karpenter launch templates" "$(karpenter_launch_templates)"
 if (( leftovers > 0 )); then
   echo "==> $leftovers leftover type(s) found. They may still be billing: check the console." >&2
 else

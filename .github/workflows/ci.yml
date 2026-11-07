@@ -31,6 +31,7 @@ env:
   KYVERNO_VERSION: v1.19.2          # CLI = the Kyverno the cluster runs (chart 3.9.2)
   KYVERNO_CHART_VERSION: 3.9.2
   KEDA_CHART_VERSION: 2.21.0
+  KARPENTER_CHART_VERSION: 1.15.1
   # Schemas for custom resources (ServiceMonitor, PrometheusRule, ExternalSecret,
   # Argo CD Application...), so they get the same strict check as built-in ones.
   CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
@@ -84,7 +85,7 @@ jobs:
         run: |
           kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
             -schema-location default -schema-location "$CRD_SCHEMAS" \
-            deploy/platform/secrets deploy/platform/policies/*.yaml \
+            deploy/platform/secrets deploy/platform/policies/*.yaml deploy/platform/karpenter-nodes \
             deploy/argocd/root-app.yaml deploy/argocd/apps
       - name: Guard rails still refuse bad input
         # (Not "! helm ...": under bash -e a "!"-prefixed command never fails the step.)
@@ -224,6 +225,22 @@ jobs:
           python3 deploy/monitoring/check_references.py keda.yaml
           grep -q 'serviceAccountName: keda-operator' keda.yaml \
             || { echo "KEDA operator no longer uses ServiceAccount keda-operator (Pod Identity association)" >&2; exit 1; }
+      - name: Karpenter chart renders with our settings
+        # From its public OCI registry. --api-versions mirrors what Argo CD passes
+        # from the cluster (the chart only renders its ServiceMonitor when the
+        # monitoring CRDs exist).
+        run: |
+          helm template karpenter oci://public.ecr.aws/karpenter/karpenter \
+            --version "$KARPENTER_CHART_VERSION" --namespace kube-system \
+            --api-versions monitoring.coreos.com/v1 \
+            -f deploy/platform/karpenter/values.yaml > karpenter.yaml
+          python3 deploy/monitoring/check_references.py karpenter.yaml
+          grep -q 'serviceAccountName: karpenter$' karpenter.yaml \
+            || { echo "Karpenter no longer uses ServiceAccount karpenter (Pod Identity association)" >&2; exit 1; }
+          grep -q 'value: "patrol-karpenter"\|value: patrol-karpenter$' karpenter.yaml \
+            || { echo "Karpenter's interruption queue setting is missing" >&2; exit 1; }
+          grep -q 'kind: ServiceMonitor' karpenter.yaml \
+            || { echo "Karpenter's ServiceMonitor didn't render" >&2; exit 1; }
 
   shell:
     runs-on: ubuntu-24.04

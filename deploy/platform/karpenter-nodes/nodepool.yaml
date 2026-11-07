@@ -1,0 +1,65 @@
+# The node pool for Patrol's workers (and only them: see the taint).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: workers
+spec:
+  template:
+    metadata:
+      labels:
+        patrol.io/pool: workers
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: workers
+      # Only pods that tolerate this land here (Patrol's workers; DaemonSets
+      # such as the network and Pod Identity agents tolerate everything).
+      # Platform pods stay on the managed On-Demand nodes.
+      taints:
+        - key: patrol.io/pool
+          value: workers
+          effect: NoSchedule
+      requirements:
+        # Spot first: Karpenter picks the cheapest available offering, and Spot
+        # is cheapest when it exists; if no Spot capacity is available it
+        # launches On-Demand instead. Workers are safe to interrupt: an order a
+        # worker didn't finish goes back to the queue and another worker gets it.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot, on-demand]
+        - key: kubernetes.io/arch          # x86, to match the images
+          operator: In
+          values: [amd64]
+        - key: kubernetes.io/os
+          operator: In
+          values: [linux]
+        # Small burstable instances (t3/t3a, 2 vCPU, 2 GiB: t3.small/t3a.small).
+        # Small on purpose: each fits about 7 workers (11 pods per node, its
+        # network-interface limit, minus 4 DaemonSet pods), so 2 baseline
+        # workers need 1 node and a 10-worker burst needs a second: the demo
+        # shows Karpenter adding and removing machines, and each node is cheap.
+        # Two families and both zones widen the Spot pools Karpenter can use.
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: [t3, t3a]
+        - key: karpenter.k8s.aws/instance-cpu
+          operator: In
+          values: ["2"]
+        - key: karpenter.k8s.aws/instance-memory
+          operator: In
+          values: ["2048"]
+      # Replace every node at least weekly (fresh AMI and patches).
+      expireAfter: 168h
+  # Cost guardrail (decision C): never more than 8 vCPU of Karpenter nodes in
+  # total, i.e. at most 4 of these. A runaway can't launch a fleet.
+  limits:
+    cpu: "8"
+  disruption:
+    # Remove empty nodes and repack underused ones, after a minute of calm.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+    # At most one node disrupted at a time (workers' PodDisruptionBudget also
+    # keeps at least one worker running).
+    budgets:
+      - nodes: "1"

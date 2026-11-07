@@ -34,3 +34,13 @@ output "pod_identity_associations" {
 output "gateway_endpoints" {
   value = { for k, e in aws_vpc_endpoint.gateway : k => e.id }
 }
+
+output "karpenter" {
+  description = "What the Git-side Karpenter config refers to."
+  value = {
+    controller_role  = module.karpenter.iam_role_name
+    node_role        = module.karpenter.node_iam_role_name
+    instance_profile = module.karpenter.instance_profile_name
+    interruption_sqs = module.karpenter.queue_name
+  }
+}

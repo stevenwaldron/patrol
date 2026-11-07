@@ -46,6 +46,10 @@ worker:
   # autoscaler would fight over it forever).
   replicas: 2
   threads: 10
+  # Run on Karpenter's "workers" node pool (Spot first; deploy/platform/
+  # karpenter-nodes): a node selector plus a toleration for the pool's taint.
+  # Empty = no preference (the managed nodes, as before Phase 8).
+  nodePool: workers
   # KEDA scales the workers on the SQS queue's length (waiting + in-progress
   # orders), not CPU: checks spend their time waiting on the network, so CPU
   # never shows a backlog. Needs KEDA (deploy/argocd/apps/keda.yaml).

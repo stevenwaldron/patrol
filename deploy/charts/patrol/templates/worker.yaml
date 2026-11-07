@@ -28,6 +28,17 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
       securityContext:
         {{- include "patrol.podSecurityContext" . | nindent 8 }}
+      {{- with .Values.worker.nodePool }}
+      # Karpenter's worker pool: Spot first, safe because an unfinished order
+      # simply returns to the queue. Only pods with this toleration land there.
+      nodeSelector:
+        karpenter.sh/nodepool: {{ . }}
+      tolerations:
+        - key: patrol.io/pool
+          operator: Equal
+          value: {{ . }}
+          effect: NoSchedule
+      {{- end }}
       topologySpreadConstraints:
         {{- include "patrol.topologySpread" $c | nindent 8 }}
       containers:

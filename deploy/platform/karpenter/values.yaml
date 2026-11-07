@@ -1,0 +1,41 @@
+# Karpenter 1.15.1 (chart 1.15.1) settings, applied by deploy/argocd/apps/karpenter.yaml.
+# The AWS side (controller role, node role + instance profile, interruption
+# queue) is in Terraform: infra/cluster/karpenter.tf.
+
+settings:
+  clusterName: patrol
+  # Spot interruption warnings, rebalance and health events from EventBridge.
+  interruptionQueue: patrol-karpenter
+  # Launch nodes for what pods REQUIRE, not for their soft preferences. The
+  # workers only *prefer* to spread across zones (ScheduleAnyway); with
+  # "Respect", Karpenter would launch a node per zone just for the 2 baseline
+  # workers. "Ignore": one Spot node at rest, a second only when the workers
+  # genuinely don't fit (the scheduler still spreads them where it can).
+  # Trade-off: at rest both workers can share one Spot node, so an interruption
+  # pauses checking for about a minute while Karpenter replaces it (it gets a
+  # 2-minute warning and starts early); orders wait safely in SQS meanwhile, and
+  # the freshness alert allows 3 minutes. Tested in the Phase 9 drills.
+  preferencePolicy: Ignore
+
+# The controller's AWS identity: EKS Pod Identity association
+# kube-system/karpenter -> role patrol-karpenter (created with the cluster).
+serviceAccount:
+  name: karpenter
+
+# One replica: a lab cluster. If it's down, existing nodes keep running; only
+# new nodes and consolidation wait. Production: 2 (leader election, the chart's
+# default). Karpenter's docs suggest 1 CPU / 1 GiB per replica for big clusters;
+# this one manages a handful of nodes. Its memory grows with the instance-type
+# catalog it caches: measured live (running log) before trusting these numbers.
+replicas: 1
+controller:
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits: { memory: 768Mi }
+
+# The chart already keeps the controller off Karpenter's own nodes (affinity:
+# karpenter.sh/nodepool DoesNotExist), so it always runs on the managed nodes.
+
+# Metrics (nodes by capacity type, launches, disruptions) into Prometheus.
+serviceMonitor:
+  enabled: true
