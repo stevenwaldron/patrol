@@ -657,6 +657,20 @@ One `app/Dockerfile` with three final targets (`scheduler`, `worker`, `status-pa
 - Rejected: load-testing real sites (would hammer CloudForger and Chess); generating load in-cluster (would need its own send permission).
 - **Security finding, logged for later:** the worker checks whatever URL an order contains. Only identities with `sqs:SendMessage` (the scheduler role, the admin) can post orders, so the exposure is contained, but a worker that only checks configured sites would be stronger. The load test relies on the current behavior.
 
+**Live (Nov 6 evening).** `up.sh`: KEDA **Synced/Healthy on the first check**, so the caBundle ignore rules (added before deploying, from the Kyverno lesson) worked; everything up in 21m 38s. ScaledObject `worker` READY True, ACTIVE False, FALLBACK False; HPA `keda-hpa-worker` 0/20 (avg), 2–10, 2 replicas: KEDA reads the queue through Pod Identity on the first try.
+- **One operator restart, explained by its own log:** `cert-rotation: server certs refreshed … Secrets have been updated; exiting so pod can be restarted (This behaviour can be changed with the option RestartOnSecretRefresh)`. On first start it generates `kedaorg-certs` and exits on purpose so the restarted pod loads them. Expected once per rebuild, not a fault (same Secret the reference check had flagged).
+
+**Live load test (Nov 6, Grafana "Autoscaling" panel):**
+- **Burst 1** (default: 100 orders per wave): from ~21:05, workers **2 → 5 within ~30 s**, then held 4–5 while the queue sawtoothed ~15–90; after the burst (~21:15) the queue emptied and workers stepped back to **2** after the 2-minute calm. *My plan predicted ~10 workers; wrong.* The HPA did exactly the configured math: ~90 orders ÷ 20 per worker → 5, and at 5 workers the queue stopped growing (they kept up), so KEDA never needed more. Max 10 is a ceiling for heavier load, not the expected value.
+- **Burst 2** (`PER_WAVE=300 WAVES=10`): queue peaked ~215, workers **hit the ceiling, 10/10**, at ~21:21:30, then 6–8 as it drained, back toward 2 after.
+- The "5-minute" burst ran ~10 minutes: each wave makes 11 AWS CLI calls from the Mac (≈1 s each) before its 10 s pause. Harmless; the script's comment now overstates it.
+- **The open assumption, settled:** `load-test` check duration p95 ≈ **9.75 s**, so 192.0.2.1 is silently dropped inside AWS and each fake check really waits its 5 s timeout. Why 9.75 and not ~5: the duration histogram's buckets jump from 5 s to 10 s; a check taking 5.0x s lands in the (5, 10] bucket, and `histogram_quantile` interpolates linearly inside it (95% of the way to 10 → 9.75). The true value is just over 5 s. Lesson: a percentile from a histogram is only as precise as its bucket edges.
+- Real sites unaffected: chess and cloudforger p95 stayed near 0 s throughout (chess ~0.2 s at the very end).
+
+**Teardown:** `Destroy complete! Resources: 59 destroyed` (59 created, one more than before: KEDA's Pod Identity association), every leftover check ok, including load balancer security groups (the new wait held during a session with up to 10 workers); "Nothing left over"; down in 14m 01s.
+
+**Phase 7 complete** (Nov 6). KEDA 2.21 scales the workers 2–10 on SQS queue length (waiting + in progress, 20 per worker) through a Pod Identity role that can only read the queue length; scale-up within 30 s, scale-down after 2 calm minutes, fallback to 2 if the queue can't be read; PatrolAutoscalerErrors alert with unit and mutation tests; Grafana panel for queue vs workers; load test proved 2 → 5 (keeping up) and 2 → 10 (ceiling) and back to 2, with no traffic to any real site. Two Argo CD problems prevented before deploying (KEDA's self-made certificate Secret and its caBundle patching), using the lessons from Phases 5 and 6.
+
 ---
 
 ## Reminders (open items)

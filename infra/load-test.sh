@@ -2,7 +2,7 @@
 # Load test for the worker autoscaler (Phase 7): post a burst of fake patrol
 # orders to the SQS queue and watch KEDA scale the workers out, then back in.
 #
-#   ./infra/load-test.sh                 # default: 100 orders every 10 s for 5 minutes
+#   ./infra/load-test.sh                 # default: 30 waves of 100 orders (~10 minutes)
 #   WAVES=12 PER_WAVE=60 ./infra/load-test.sh
 #
 # The orders point at 192.0.2.1, an address reserved for documentation
@@ -21,7 +21,7 @@ PROFILE=patrol
 EXPECTED_ACCOUNT=419701112481
 REGION=us-east-1
 QUEUE_NAME=patrol-checks
-WAVES=${WAVES:-30}             # 30 waves x 10 s = 5 minutes
+WAVES=${WAVES:-30}             # 30 waves; each = ~11 s of API calls + INTERVAL
 PER_WAVE=${PER_WAVE:-100}      # orders per wave, sent 10 per API call
 INTERVAL=${INTERVAL:-10}       # seconds between waves
 # Never answers (documentation-only address). Assumption to verify live: AWS
