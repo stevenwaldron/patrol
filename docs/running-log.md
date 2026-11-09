@@ -722,10 +722,28 @@ The leftover check gained "Karpenter nodes" and "Karpenter launch templates". Ta
 
 **CI:** the published Karpenter chart rendered from its OCI registry with our values; reference check; asserts the ServiceAccount (`karpenter`, which the Pod Identity association depends on), the interruption queue, and the ServiceMonitor. The node pool manifests are now part of the platform validation. Risk noted: anonymous pulls from ECR Public can be rate-limited (Dependabot's docker updates hit that); a rare red there means "retry", not "broken".
 
+**Finding (CI after the Phase 8 push, Nov 7): Trivy gate red again, zlib this time.**
+- *Symptom:* push `Phase 8` → every job green except the three images jobs, failing at Trivy right after a fresh database download. Phase 8 touched nothing in `app/`.
+- *Findings:* `zlib1g` `1:1.3.dfsg+really1.3.1-1+b1` (the version noted when the base image was pinned on Oct 26), fixed in `…-1+deb13u1`: **CVE-2026-85091** (HIGH, heap buffer overflow in `gz_vacate()`) and **CVE-2026-76844**, whose title in Trivy's database reads "webpack-dev-middleware: Information Disclosure via Path Traversal", a JavaScript package not in our image. Most likely a data mix-up in the vulnerability database (one CVE carrying another advisory's title); resolved by the same update either way. Lesson: scanner output is data to check, not gospel.
+- Unlike apt, zlib **can't be removed**: Python and httpx depend on it. The fix has to be the patched package.
+- *Checked before choosing:* the official `python:3.13-slim` had been rebuilt (new digest `09a17cad…`) but **still shipped `-1+b1`**. Official images can lag a Debian security fix by days.
+- *Exposure:* `gz_vacate()` is in zlib's gzip *file* functions; as far as I know Python's `zlib` module and httpx use the in-memory stream functions, so Patrol probably never calls the vulnerable code (not verified).
+- *Decision (Steven): wait* for Docker's rebuild, then bump the digest (the clean, reproducible fix). Rejected for now: upgrading zlib inside the build, either to "latest" (non-reproducible) or pinned to `deb13u1` (fixes today, but adds a temporary line to the Dockerfile). Accepted meanwhile: the images jobs stay red on pushes (Steven's direct pushes bypass the ruleset; deploy PRs would be blocked, but none are needed until the fix), and the running `d188e16` images keep the vulnerable zlib.
+
+**Live (Nov 9).** `up.sh`: karpenter and karpenter-nodes Synced/Healthy first time (so the discovery tags, AMI alias, Terraform-made instance profile and IAM all resolved); everything up in 28m 00s.
+- At rest: **1 NodeClaim, t3.small, Spot, us-east-1a**; both workers on it; the platform stayed on the 2 On-Demand t3.medium nodes (taint + selector work). Karpenter controller memory **235 MiB** (request 384, limit 768). `kubectl top` failed: no metrics-server installed (Prometheus does that job); read the same number from cAdvisor in Prometheus instead.
+- **Burst** (`PER_WAVE=300 WAVES=10`): 00:32 workers 2 → 6 (fit on node 1); 00:33 → 10 (ceiling), the rest Pending; **~00:34 Karpenter launched a second Spot t3.small** and the Pending workers started there; queue peaked ~190; workers trimmed to 8, then 6 as the queue settled. HPA TARGETS `14334m/20` mid-burst = 14.3 orders per worker.
+- **Scale-down:** after the burst, workers back to 2, and Karpenter consolidated to **1 node**. It kept the *newer* node and removed the original: consolidation packs onto the fewest, cheapest nodes and removes whichever ends up empty; age doesn't matter.
+- The cluster was left running overnight (~7½ h, roughly $3–4). Lesson for the drills: run `down.sh` at the end of each session, even mid-test.
+- **First teardown with Karpenter:** `Destroy complete! Resources: 82 destroyed` (82 created, as planned); every leftover check ok, including the new **Karpenter nodes** and **Karpenter launch templates**; "Nothing left over"; down in 15m 04s.
+
+**Phase 8 complete** (Nov 9). Karpenter 1.15.1 runs Patrol's workers on Spot nodes (On-Demand fallback, 8 vCPU cap) next to the On-Demand platform nodes; the AWS side (Pod Identity controller role, Terraform-made instance profile, interruption queue) is in the cluster layer; the full chain was proven live: queue → KEDA → 10 workers → no room → Karpenter adds a node → back to 2 workers and 1 node. Teardown cleans up Karpenter's nodes and launch templates before Terraform runs.
+
 ---
 
 ## Reminders (open items)
 
+- [ ] **zlib CVE-2026-85091 / -76844:** bump the `python:3.13-slim` digest once `dpkg-query -W zlib1g` in it shows `…-1+deb13u1`; then images CI goes green and the release bot deploys.
 - [ ] **Base image digest:** bump `python:3.13-slim` in `app/Dockerfile` once it ships apt ≥ 3.0.4 (Dependabot's docker updates hit ECR Public's anonymous rate limit, so check by hand).
 - [ ] **Audit findings to fix:** set `seccompProfile: RuntimeDefault` for the AWS Load Balancer Controller (our Helm values); check whether the EKS coredns add-on configuration can set seccomp/run-as-non-root.
 - [ ] **Worker URL allow-list** (security finding, Phase 7): only check URLs of configured sites; the load test would then need a configured test site.
