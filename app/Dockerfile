@@ -43,6 +43,21 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PROMETHEUS_DISABLE_CREATED_SERIES=True \
     PATROL_SITES_FILE=/app/config/sites.yaml
+# TEMPORARY security patch (2026-11-09): zlib CVE-2026-85091 / CVE-2026-76844.
+# The pinned base image ships zlib1g 1:1.3.dfsg+really1.3.1-1+b1; Debian has
+# released the fix (…-1+deb13u1), but the official python:3.13-slim image hadn't
+# been rebuilt with it after 3 days. So this installs EXACTLY the fixed version
+# from Debian's security repository (already in the image's apt sources), then
+# checks it. Pinned, not "latest": the same commit always installs the same
+# zlib, and if that version ever disappears from Debian's mirror the build fails
+# loudly instead of taking something else. Runs before apt is removed below.
+# REMOVE this step when bumping the base digest to one that already ships
+# deb13u1 (`docker run --rm <image> dpkg-query -W zlib1g`); it then does nothing.
+ARG ZLIB_FIXED_VERSION=1:1.3.dfsg+really1.3.1-1+deb13u1
+RUN apt-get update \
+ && apt-get install --yes --no-install-recommends "zlib1g=${ZLIB_FIXED_VERSION}" \
+ && rm -rf /var/lib/apt/lists/* \
+ && test "$(dpkg-query -W -f '${Version}' zlib1g)" = "${ZLIB_FIXED_VERSION}"
 # Remove the base image's own pip (and the installer wheels Python bundles for
 # "ensurepip") for the same reason: a runtime image has no use for an installer.
 # Same for Debian's installer, apt, and its library: Patrol never installs

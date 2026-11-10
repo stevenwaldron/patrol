@@ -739,11 +739,16 @@ The leftover check gained "Karpenter nodes" and "Karpenter launch templates". Ta
 
 **Phase 8 complete** (Nov 9). Karpenter 1.15.1 runs Patrol's workers on Spot nodes (On-Demand fallback, 8 vCPU cap) next to the On-Demand platform nodes; the AWS side (Pod Identity controller role, Terraform-made instance profile, interruption queue) is in the cluster layer; the full chain was proven live: queue → KEDA → 10 workers → no room → Karpenter adds a node → back to 2 workers and 1 node. Teardown cleans up Karpenter's nodes and launch templates before Terraform runs.
 
+**zlib: decision changed (Nov 9), pinned in-build upgrade.** After 3 days the official `python:3.13-slim` still shipped `zlib1g …-1+b1` (checked daily). Steven chose to stop waiting: the runtime stage now runs `apt-get update` and installs **exactly** `zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1` (an `ARG`, so it's one named value) from Debian's security repository, removes the apt lists, and fails the build unless `dpkg-query` reports exactly that version. It runs before apt is purged.
+- *Why pinned, not "upgrade to latest":* the same commit installs the same zlib on any day; if the version vanishes from Debian's mirror, the build fails loudly rather than drifting.
+- *Trade-offs accepted:* a temporary step in the Dockerfile; the build now reaches Debian's servers (it didn't before); it can't be verified in my sandbox (no Docker), so the proof is a local build on the Mac, then Trivy in CI.
+- *Exit plan:* when the official image ships `deb13u1`, bump the base digest and delete the step (comment in the Dockerfile says so).
+
 ---
 
 ## Reminders (open items)
 
-- [ ] **zlib CVE-2026-85091 / -76844:** bump the `python:3.13-slim` digest once `dpkg-query -W zlib1g` in it shows `…-1+deb13u1`; then images CI goes green and the release bot deploys.
+- [ ] **zlib pin cleanup:** once `python:3.13-slim` ships `zlib1g …-1+deb13u1`, bump the base digest and delete the temporary zlib step in `app/Dockerfile`.
 - [ ] **Base image digest:** bump `python:3.13-slim` in `app/Dockerfile` once it ships apt ≥ 3.0.4 (Dependabot's docker updates hit ECR Public's anonymous rate limit, so check by hand).
 - [ ] **Audit findings to fix:** set `seccompProfile: RuntimeDefault` for the AWS Load Balancer Controller (our Helm values); check whether the EKS coredns add-on configuration can set seccomp/run-as-non-root.
 - [ ] **Worker URL allow-list** (security finding, Phase 7): only check URLs of configured sites; the load test would then need a configured test site.
