@@ -7,6 +7,10 @@ metadata:
     {{- include "patrol.labels" $c | nindent 4 }}
 spec:
   schedule: {{ .Values.scheduler.schedule | quote }}
+  # Drill switch (drill.schedulerSuspended): no new runs while true, so checks
+  # stop and the freshness alerts must fire. Set in Git, never with kubectl:
+  # Argo CD would undo a manual change (Phase 9, drill 6).
+  suspend: {{ .Values.drill.schedulerSuspended }}
   timeZone: Etc/UTC
   # Never run two at once; if a run is somehow still going, skip the next one.
   concurrencyPolicy: Forbid

@@ -44,3 +44,8 @@ output "karpenter" {
     interruption_sqs = module.karpenter.queue_name
   }
 }
+
+output "spot_interruption_experiment" {
+  description = "AWS FIS experiment template ID for drill 4 (interrupt one worker Spot node)."
+  value       = aws_fis_experiment_template.spot_interruption.id
+}

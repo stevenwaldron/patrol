@@ -54,8 +54,29 @@ capabilities:
 {{- end }}
 
 {{/* Restart pods when the site list changes (the status page reads it once at startup). */}}
+{{/*
+The site list the cluster actually uses: .Values.sites, with any drill URL
+overrides applied (drill.siteUrlOverrides, Phase 9). Overrides live outside
+`sites` on purpose: `sites` must stay identical to config/sites.yaml
+(app/tests/test_chart_sites.py), and changing config/ would trigger an image
+release. Returned as YAML; callers use fromYamlArray.
+*/}}
+{{- define "patrol.effectiveSites" -}}
+{{- $overrides := .Values.drill.siteUrlOverrides }}
+{{- $sites := list }}
+{{- range .Values.sites }}
+{{- $s := deepCopy . }}
+{{- if hasKey $overrides .id }}
+{{- $_ := set $s "url" (get $overrides .id) }}
+{{- end }}
+{{- $sites = append $sites $s }}
+{{- end }}
+{{- toYaml $sites }}
+{{- end }}
+
+{{/* Restart the scheduler and status page when the effective site list changes. */}}
 {{- define "patrol.sitesChecksum" -}}
-checksum/sites: {{ toYaml .Values.sites | sha256sum }}
+checksum/sites: {{ include "patrol.effectiveSites" . | sha256sum }}
 {{- end }}
 
 {{/*

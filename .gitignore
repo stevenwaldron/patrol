@@ -36,3 +36,6 @@ venv/
 
 # Local backup copies made while editing (never commit them)
 *.before-*
+
+# Availability probe logs from the Phase 9 drills (infra/probe.sh)
+probe-*.log

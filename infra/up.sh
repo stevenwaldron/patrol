@@ -242,6 +242,8 @@ Karpenter adds and removes the Spot nodes they run on):
   kubectl --context $CLUSTER get nodeclaims,nodes -L karpenter.sh/capacity-type,node.kubernetes.io/instance-type
   ./infra/load-test.sh     # a 5-minute burst of fake orders to watch it scale
 
+Failure drills (Phase 9): docs/drills.md; availability probe: ./infra/probe.sh
+
 Kyverno policy results (Patrol's own rules, then the cluster-wide audit):
   kubectl --context $CLUSTER -n patrol get policyreports
   kubectl --context $CLUSTER get policyreports -A

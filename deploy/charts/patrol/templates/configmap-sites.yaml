@@ -1,3 +1,10 @@
+{{- range $id, $_ := .Values.drill.siteUrlOverrides }}
+{{- $known := false }}
+{{- range $.Values.sites }}{{ if eq .id $id }}{{ $known = true }}{{ end }}{{ end }}
+{{- if not $known }}
+{{- fail (printf "drill.siteUrlOverrides: no site with id %q" $id) }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,5 +13,6 @@ metadata:
     {{- include "patrol.labels" (dict "root" . "component" "config") | nindent 4 }}
 data:
   sites.yaml: |
-    # Generated from the Helm chart's values (sites). Edit values.yaml, not this.
-    {{- dict "sites" .Values.sites | toYaml | nindent 4 }}
+    # Generated from the Helm chart's values (sites, plus any drill overrides).
+    # Edit values.yaml, not this.
+    {{- dict "sites" (include "patrol.effectiveSites" . | fromYamlArray) | toYaml | nindent 4 }}

@@ -743,6 +743,28 @@ The leftover check gained "Karpenter nodes" and "Karpenter launch templates". Ta
 - *Why pinned, not "upgrade to latest":* the same commit installs the same zlib on any day; if the version vanishes from Debian's mirror, the build fails loudly rather than drifting.
 - *Trade-offs accepted:* a temporary step in the Dockerfile; the build now reaches Debian's servers (it didn't before); it can't be verified in my sandbox (no Docker), so the proof is a local build on the Mac, then Trivy in CI.
 - *Exit plan:* when the official image ships `deb13u1`, bump the base digest and delete the step (comment in the Dockerfile says so).
+- *Verified (Nov 9):* local build on the Mac: `zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1`, `apt: gone`, user 10001, `zlib, boto3, httpx` import OK. Push `f18ee0b`: CI #26 green (Trivy passes), release #5 built and pushed the images, deploy PR #6 green on all 11 required checks and merged (`c40dc05`, image tag `f18ee0b`).
+- *Note:* re-running the red Phase 8 CI runs (#24, #25) fails again, correctly: a re-run rebuilds the same commit, with the old Dockerfile. Re-runs only help with failures caused by luck (network, rate limits), never with a fix made later. Those runs stay red as honest history.
+
+---
+
+## Phase 9: failure drills
+
+**Plan approved (Nov 9):** 10 drills in two sessions (losing machines; breaking things in software), each with a written prediction, exact commands, signals, undo, and a results line (`docs/drills.md`). Decisions: **A** = a real Spot interruption via AWS Fault Injection Service; **B** = take a site down by changing its URL through Git; **C** = two sessions.
+
+**Built:**
+- **`infra/probe.sh`:** requests the status page once a second and, on Ctrl+C, prints requests, failures, availability % and the longest outage. Turns "it stayed up" into a number. Tested against an unreachable address (8/8 failed) and a local server stopped for 3 s mid-run (3 failed, longest outage 3 s). Logs (`probe-*.log`) are git-ignored.
+- **FIS** (`infra/cluster/fis.tf`): role `patrol-fis-spot-interruption`, trusted only by FIS from this account; may send Spot interruptions **only** to instances tagged as Karpenter `workers` nodes of this cluster. Experiment template: `aws:ec2:send-spot-instance-interruptions`, target `aws:ec2:spot-instance` (`COUNT(1)`, running, same two tags), `durationBeforeInterruption PT2M` (the real notice). Shape taken from AWS's FIS Spot tutorial; resource arguments checked against the AWS provider docs at the locked version 6.69.1. Not `terraform validate`d locally (registry unreachable from my sandbox); CI's terraform job validates it. Only a template exists until a drill starts it; about $0.10 per run. Cluster plan becomes **85 to add** (82 + role, policy, template).
+- **Chart 0.6.0, drill switches** (`drill:` in values, schema-validated):
+  - `siteUrlOverrides`: per-site URL replacement applied in a new `patrol.effectiveSites` helper. Kept outside `sites` on purpose: `sites` must match `config/sites.yaml` (the sites test), and changing `config/` would trigger an image release. An unknown site ID fails the render; a non-URL fails the schema. The sites checksum now hashes the effective list, so the scheduler and status page restart when an override changes.
+  - `schedulerSuspended` → the CronJob's `suspend`. Through Git, because Argo CD would undo a `kubectl` pause (drill 6 demonstrates exactly that).
+  - The default render is identical to 0.5.0 apart from the version label and a comment (same sites checksum).
+- **Offline checks of two predictions:** drill 10's writable-filesystem change makes `kyverno apply` fail (exit 1); drill 9's tag `0000000` passes every policy (format only), so the bad deploy reaches the cluster as intended.
+
+**Predictions worth watching** (written before running, in the runbook):
+- Drill 2: two t3.medium nodes at ~45% each can't absorb each other: some platform pods, maybe Prometheus, likely stay Pending during a drain, and while Prometheus is down no alert can fire.
+- Drill 9: the status page and workers keep serving (rolling updates with `maxUnavailable: 0`), but the scheduler CronJob has no "old version": every new run uses the bad tag. So checks stop and the scheduler and stale alerts fire.
+- Drill 8: the ScaledObject fallback should make Argo CD mark the patrol app Degraded.
 
 ---
 

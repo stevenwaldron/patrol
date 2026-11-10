@@ -10,7 +10,8 @@
     "worker",
     "statusPage",
     "ingress",
-    "monitoring"
+    "monitoring",
+    "drill"
   ],
   "properties": {
     "expectedNamespace": {
@@ -254,6 +255,26 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 3600
+        }
+      }
+    },
+    "drill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "siteUrlOverrides",
+        "schedulerSuspended"
+      ],
+      "properties": {
+        "siteUrlOverrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^https?://"
+          }
+        },
+        "schedulerSuspended": {
+          "type": "boolean"
         }
       }
     }
