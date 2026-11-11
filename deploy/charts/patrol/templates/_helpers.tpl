@@ -41,7 +41,7 @@ seccompProfile:
 {{/* Container-level security: no privilege escalation, no Linux capabilities, read-only filesystem. */}}
 {{- define "patrol.containerSecurityContext" -}}
 allowPrivilegeEscalation: false
-readOnlyRootFilesystem: true
+readOnlyRootFilesystem: false
 capabilities:
   drop: ["ALL"]
 {{- end }}
