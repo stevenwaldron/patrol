@@ -804,6 +804,13 @@ Chart **0.7.0**. All checks offline: helm lint; kubeconform 20/20 (both modes); 
 
 ---
 
+**Bug: first push of the fix list failed CI (Nov 11).**
+- *Symptom:* the chart job on `main` (ci #38) retried `AssumeRoleWithWebIdentity` 12 times, then failed with "Not authorized to perform sts:AssumeRoleWithWebIdentity".
+- *Cause:* the commit was pushed before the permanent-layer apply, so the role `patrol-ci-image-check` didn't exist yet (`aws iam get-role` → NoSuchEntity). For a role that doesn't exist, AWS returns the same "Not authorized" error as for a trust mismatch, so the message alone can't tell the two apart; `get-role` can.
+- *Fix:* plan (2 to add) → apply → "Re-run failed jobs" on ci #38 → green. A re-run was valid here because the code was fine; only the AWS side was missing.
+- *Lesson:* when a change needs both IAM and the workflow that uses it, apply Terraform **before** pushing.
+- *Also found:* the policies job's guard printed "No policy matched Patrol's workloads" when policies *did* match but failed (drill 10). It now prints "A policy failed" for failures and keeps "No policy matched" for the zero-matches case.
+
 ## Reminders (open items)
 
 - [ ] **zlib pin cleanup:** once `python:3.13-slim` ships `zlib1g …-1+deb13u1`, bump the base digest and delete the temporary zlib step in `app/Dockerfile`.

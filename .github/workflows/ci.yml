@@ -258,7 +258,9 @@ jobs:
           kyverno apply deploy/platform/policies/*.yaml library.yaml --resource patrol.yaml \
             --values-file deploy/platform/policies/tests/values.yaml | tee apply.txt
           # Guard against "passes" because nothing matched (e.g. a selector typo).
-          grep -Eq 'pass: [1-9][0-9]*, fail: 0' apply.txt \
+          grep -Eq 'fail: 0' apply.txt \
+            || { echo "A policy failed: see the lines above" >&2; exit 1; }
+          grep -Eq 'pass: [1-9][0-9]*,' apply.txt \
             || { echo "No policy matched Patrol's workloads: check the selectors" >&2; exit 1; }
       - name: Kyverno chart renders with our settings
         run: |
