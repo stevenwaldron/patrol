@@ -36,12 +36,12 @@ Spot drill first keeps its evidence intact.
 ### Drill 1: kill pods
 | | |
 |---|---|
-| **Break** | `kubectl --context patrol -n patrol delete pod $(kubectl --context patrol -n patrol get pod -l app.kubernetes.io/component=status-page -o name \| head -1)` then the same with `component=worker` |
+| **Break** | `kubectl --context patrol -n patrol delete $(kubectl --context patrol -n patrol get pod -l app.kubernetes.io/component=status-page -o name \| head -1)` then the same with `component=worker` (`-o name` already prints `pod/<name>`, so no `pod` before it) |
 | **Prediction** | Each Deployment replaces its pod within seconds. Probe: **0 failed** (the other status-page copy keeps serving; the load balancer stops sending to a pod as soon as it starts shutting down, thanks to the readiness gate and the preStop pause). No alerts. |
 | **Undo** | Nothing: Kubernetes does it. |
 | **Signals** | Pods view: a new pod name, `Running` within ~30 s. |
 
-**Result:** _break at …, recovered at …, probe: … failed, longest outage … s. Alerts: …_
+**Result (Nov 10):** status page pod deleted 00:30, replacement Running and Ready (readiness gate 1/1) within seconds; worker pod deleted 00:34, replacement Running within a minute on the same Spot node; scheduler runs kept completing every minute. Probe: **588 requests over 677 s, 0 failed (100.00%)**. No alerts. **Prediction confirmed.**
 
 ### Drill 4: AWS reclaims the Spot worker node (AWS FIS)
 | | |
@@ -51,7 +51,7 @@ Spot drill first keeps its evidence intact.
 | **Undo** | Nothing: Karpenter does it. If no replacement appears within 5 minutes: `kubectl --context patrol -n kube-system logs deploy/karpenter \| grep -i -E 'interrupt\|error'`. |
 | **Signals** | `kubectl --context patrol get nodeclaims -w` (a second NodeClaim appears, the first goes); Karpenter logs (`interruption`); Grafana "Karpenter: worker nodes" and "Age of latest check". FIS console: experiment `completed`. |
 
-**Result:** _…_
+**Result (Nov 10):** FIS experiment started 00:41 (ID EXPaGRK8P53DBTMqKp). Karpenter log 00:41:08: `initiating delete from interruption message`, `messageKind: spot_interrupted`, queue `patrol-karpenter`, action `CordonAndDrain`; old node tainted `karpenter.sh/disrupted` the same second. **Replacement ordered at once:** `workers-f4w2r`, **t3a.small Spot in us-east-1b** (different type and zone from the reclaimed t3.small in 1a). Workers moved one by one (`wsm5l`, then `hb4fd`; the second eviction was "Forceful Termination", i.e. not held back by the workers' disruption budget with the node about to vanish). By 00:43:52: 1 NodeClaim (the new one), 2 workers Running. Grafana: Spot nodes 1 → **2** (make-before-break) → 1; workers never below 2. Scheduler kept running on the platform nodes throughout. Probe: **384 requests / 439 s, 0 failed (100.00%)**. No Slack alert. **Prediction confirmed.**
 
 ### Drill 2: planned maintenance (drain a platform node)
 | | |
@@ -61,7 +61,13 @@ Spot drill first keeps its evidence intact.
 | **Undo** | `kubectl --context patrol uncordon <node>` |
 | **Signals** | Pods view; `kubectl --context patrol get pods -A --field-selector=status.phase=Pending`. |
 
-**Result:** _…_
+**Result (Nov 10): prediction partly wrong — the most useful drill so far.** Drained `ip-10-20-22-207` at ~00:52 (completed); uncordoned 00:56.
+- Probe: **116 requests / 149 s, 2 failed (98.28%)**: timeouts (`000`, 5 s) at **00:52:14 and 00:52:21**. Predicted 0.
+- **Cause (evidence lines up):** the same drain evicted the status-page pod *and* the only AWS Load Balancer Controller (~00:52:03). The status page's preStop pause (10 s) ended ~00:52:13 and the process stopped, but with no controller running nobody removed it from the ALB's target group, so the ALB kept sending some requests to a dead target until the new controller became leader (~00:52:2x). Both failures fall inside that window.
+- **Pending pods:** `scheduler` (**no new checks ordered** while it waited), `kyverno-admission-controller` (Kyverno down; fail-open as designed: Patrol's 5 rules unenforced, Pod Security Admission still enforcing), `kube-prometheus-stack-operator` (config only; Prometheus itself was on the other node, so alerts kept working). Predicted Prometheus might be stuck; it wasn't. Didn't predict the scheduler.
+- Both status-page copies ended up on the same node: no zone spread until the node returned.
+- **Alerting worked anyway:** the Pending scheduler runs hit their 50-second deadline and failed, so **PatrolSchedulerJobFailed** reached Slack at 00:54 (runs 29904833, -834, -835), ~2 minutes into the problem. PatrolChecksStale did not fire (checking paused ~4 minutes, under its 5 + 5). After uncordon: no Pending pods.
+- **Findings to fix:** (1) correction: the controller already runs 2 replicas, but the drain evicted the *leader*, and the standby only took over when the lease expired (~20 s) → make the status-page pod outlive that gap (longer preStop pause); (2) two platform nodes can't absorb each other (no N+1 headroom) → a priority class so Patrol's scheduler and status page pre-empt less critical pods, and/or a third platform node.
 
 ### Drill 3: a platform node dies suddenly
 | | |
@@ -71,7 +77,10 @@ Spot drill first keeps its evidence intact.
 | **Undo** | Nothing: the node group replaces it. |
 | **Signals** | Nodes view (`NotReady`, then a new node); probe. |
 
-**Result:** _…_
+**Result (Nov 10): better than predicted, faster than predicted.** Run as option B: one status-page copy and the standby load balancer controller first moved to the other node (drill 2 had left both copies, and both controllers, on one node). Terminated `i-0714658518073c0e0` (`ip-10-20-35-68`, holding a status-page copy and the controller **leader**) at 01:11.
+- Probe: **246 requests / 287 s, 1 failed (99.59%)**: a single **502 in 0.08 s at 01:11:43**. A fast 502 from the load balancer (a connection to a dead target refused), not a 5-second timeout.
+- Replacement node `ip-10-20-36-247` Ready ~1 minute before 01:15 (~3 min after termination). The lost status-page copy came back in ~1½ minutes (`v244v`), on the surviving node, not after the ~5 minutes I expected: EKS noticed the instance was terminated and deleted the Node object, so its pods were replaced at once instead of waiting out the unreachable-node timeout. No Pending pods at the end.
+- Predicted "a few failures over 20–40 s" and ~5-minute pod replacement; reality was 1 failure and ~1½ minutes.
 
 ---
 
