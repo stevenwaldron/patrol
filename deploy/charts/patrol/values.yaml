@@ -106,4 +106,4 @@ drill:
   # to simulate that site going down. `sites` above stays untouched.
   siteUrlOverrides: {}
   # Stop the scheduler: no new orders, so check freshness decays.
-  schedulerSuspended: false
+  schedulerSuspended: true
