@@ -811,6 +811,13 @@ Chart **0.7.0**. All checks offline: helm lint; kubeconform 20/20 (both modes); 
 - *Lesson:* when a change needs both IAM and the workflow that uses it, apply Terraform **before** pushing.
 - *Also found:* the policies job's guard printed "No policy matched Patrol's workloads" when policies *did* match but failed (drill 10). It now prints "A policy failed" for failures and keeps "No policy matched" for the zero-matches case.
 
+**Drill 2 re-run (Nov 11): the fix list works, and the drill found two more problems.**
+- *Result:* 0 failed of 191 (was 2 of 116); the scheduler ran on time (was Pending). Fixes 1 (30 s preStop) and 2 (PriorityClass) proven on a real cluster.
+- *Surprise A, symptom first:* the Pending list showed `prometheus-kps-kube-prometheus-stack-prometheus-0`. *Cause:* Prometheus happened to be on the drained node this time and its 400 Mi request didn't fit on the survivor. Priority protected Patrol, so the next-largest pod lost. Alerting was blind for ~2–3 min and history was lost (no disk, a cost choice).
+- *Surprise B, symptom first:* a Slack warning "A scheduler run failed (scheduler-29906772)" at 09:15. *Cause:* the drain evicted that run mid-flight, and `backoffLimit: 0` makes any pod failure a Job failure. Not a real outage.
+- *Process note:* I told Steven to rebalance as soon as the alert was Pending, so the not-spread alert never reached Slack. Next time: wait for Firing before acting on a drill step.
+- *Write-up:* Phase 10 PDF built (8 pages, 9 figures) with a new reusable `docstyle.py`, since there was no existing one to match.
+
 ## Reminders (open items)
 
 - [ ] **zlib pin cleanup:** once `python:3.13-slim` ships `zlib1g …-1+deb13u1`, bump the base digest and delete the temporary zlib step in `app/Dockerfile`.
@@ -821,6 +828,8 @@ Chart **0.7.0**. All checks offline: helm lint; kubeconform 20/20 (both modes); 
 - [x] **Drill 2 fixes:** status-page preStop pause longer than the load balancer controller's leader handover (~20 s; e.g. 30 s, grace period raised to match); PriorityClass for Patrol's scheduler/status page (or a third platform node); rebalance after maintenance (e.g. topology spread that is enforced, or a descheduler). Re-run drill 2 after.
 - [x] **PatrolAutoscalerErrors wording:** drop the misleading count ("2.012 failed queue reads") from the description.
 - [x] **CI: image tag must exist in ECR** (drill 9): fail the chart job if `aws ecr describe-images` can't find the chart's `image.tag` in all three repositories.
+- [ ] **Prometheus during a drain** (drill 2 re-run): a PriorityClass for Prometheus between `patrol-critical` and the default, so less critical platform pods are the ones left Pending; or a third platform node.
+- [ ] **Scheduler eviction ≠ failure** (drill 2 re-run): add a Job `podFailurePolicy` (`DisruptionTarget` → `Ignore`) so a drain-evicted run is retried instead of alerting.
 - [ ] **Nightly re-scan** of the deployed images (a scan result is only as current as Trivy's database).
 - [ ] **Backstory for `1cd545d`** (Nov 4 Terraform fix): ask Steven what problem it solved, for the write-up.
 - [ ] **Repeatable builds:** consider a hashed lock file for transitive Python dependencies (botocore floated from 1.43.115 to 1.43.123 under the same requirements).

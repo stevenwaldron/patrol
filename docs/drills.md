@@ -85,6 +85,14 @@ Spot drill first keeps its evidence intact.
 - **Alerting worked anyway:** the Pending scheduler runs hit their 50-second deadline and failed, so **PatrolSchedulerJobFailed** reached Slack at 00:54 (runs 29904833, -834, -835), ~2 minutes into the problem. PatrolChecksStale did not fire (checking paused ~4 minutes, under its 5 + 5). After uncordon: no Pending pods.
 - **Findings to fix:** (1) correction: the controller already runs 2 replicas, but the drain evicted the *leader*, and the standby only took over when the lease expired (~20 s) → make the status-page pod outlive that gap (longer preStop pause); (2) two platform nodes can't absorb each other (no N+1 headroom) → a priority class so Patrol's scheduler and status page pre-empt less critical pods, and/or a third platform node.
 
+**Re-run after the fix list (Nov 11, chart 0.7.0): fixes proven.** Same setup as the first run: drained `ip-10-20-28-226`, which held a status-page copy, the scheduler and the load balancer controller's **leader** (checked with the `aws-load-balancer-controller-leader` lease). Drained at ~09:12, uncordoned ~09:14.
+- Probe: **191 requests / 221 s, 0 failed (100%)**. Was 2 failed. The 30 s preStop pause outlasted the leader handover.
+- Scheduler: **not Pending**. Runs `29906773` and `29906774` completed on the other node (priority `patrol-critical`).
+- **New finding A:** this time **Prometheus** was on the drained node and was the pod left Pending (~2–3 min, 400 Mi request didn't fit). No alert could fire in that window, and with no persistent volume its history was lost. The no-N+1-headroom problem moved, it didn't go away.
+- **New finding B:** the drain evicted a running scheduler pod (`scheduler-29906772`). With `backoffLimit: 0` the eviction counted as a failed Job, so **PatrolSchedulerJobFailed** reached Slack at 09:15 (resolved 09:25). No checks were missed. Fix idea: a Job `podFailurePolicy` that ignores `DisruptionTarget`.
+- Not-spread alert: went **Pending** correctly with both copies on `ip-10-20-43-101`. The rebalance was done before its 15 min ran out, so it never reached Slack (the Firing path is covered by the unit test). After `rollout restart` the copies were on different nodes and the rule was back to **inactive**.
+- Teardown: 85 destroyed, nothing left over, 15m14s.
+
 ### Drill 3: a platform node dies suddenly
 | | |
 |---|---|
