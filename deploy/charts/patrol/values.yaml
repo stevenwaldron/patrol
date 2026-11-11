@@ -104,6 +104,6 @@ monitoring:
 drill:
   # Replace a site's URL in the cluster (e.g. chess: https://patrol-drill.invalid)
   # to simulate that site going down. `sites` above stays untouched.
-  siteUrlOverrides: {}
+  siteUrlOverrides: { chess: https://patrol-drill.invalid }
   # Stop the scheduler: no new orders, so check freshness decays.
   schedulerSuspended: false
