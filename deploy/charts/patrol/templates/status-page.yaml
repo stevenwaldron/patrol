@@ -20,11 +20,14 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "patrol.labels" $c | nindent 8 }}
+        {{- include "patrol.podLabels" $c | nindent 8 }}
       annotations:
         {{- include "patrol.sitesChecksum" . | nindent 8 }}
     spec:
       serviceAccountName: status-page
+      {{- if .Values.priority.enabled }}
+      priorityClassName: patrol-critical
+      {{- end }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: {{ .Values.statusPage.terminationGracePeriodSeconds }}
       securityContext:

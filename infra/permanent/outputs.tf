@@ -62,3 +62,8 @@ output "github_actions_role_arn" {
   description = "Role GitHub Actions assumes via OIDC (main branch only) to push images."
   value       = aws_iam_role.github_actions.arn
 }
+
+output "github_image_check_role_arn" {
+  description = "Read-only role CI assumes (pull requests and main) to check image tags exist in ECR."
+  value       = aws_iam_role.github_image_check.arn
+}

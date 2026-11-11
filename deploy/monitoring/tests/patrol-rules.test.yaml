@@ -210,7 +210,7 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: KEDA can't read the patrol queue; workers are held at the minimum.
-              description: '40 failed queue reads in the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
+              description: 'KEDA has been reporting errors reading the queue during the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
 
   # 11. Workers stuck Pending (no node for them) alert after 10 minutes; a
   #     worker that's Pending briefly while its node starts never does.
@@ -236,4 +236,36 @@ tests:
             exp_annotations:
               summary: Patrol workers have been waiting for a node for 10 minutes.
               description: '1 worker pod(s) Pending. Check `kubectl -n patrol describe pod` and the Karpenter controller logs (kube-system).'
+
+  # 12. Status page copies on the same node: alert after 15 minutes; spread
+  #     copies, or a lone Pending replacement, never alert.
+  - interval: 1m
+    input_series:
+      # Spread for 10 min, then pod-b moves onto node-1 (both on one node).
+      - series: 'kube_pod_info{namespace="patrol", pod="status-page-a", node="node-1"}'
+        values: '1x60'
+      - series: 'kube_pod_info{namespace="patrol", pod="status-page-b", node="node-2"}'
+        values: '1x10 _x50'
+      - series: 'kube_pod_info{namespace="patrol", pod="status-page-c", node="node-1"}'
+        values: '_x10 1x50'
+      # A Pending pod (no node) doesn't count as a node.
+      - series: 'kube_pod_info{namespace="patrol", pod="status-page-d", node=""}'
+        values: '1x60'
+      # Another app's pods are ignored.
+      - series: 'kube_pod_info{namespace="other", pod="status-page-x", node="node-9"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PatrolStatusPageNotSpread
+        exp_alerts: []
+      - eval_time: 22m          # together since 11m: 11 minutes, not yet
+        alertname: PatrolStatusPageNotSpread
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PatrolStatusPageNotSpread
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Both status page copies are running on the same node.
+              description: 'A single node failure would take the status page down. Rebalance: kubectl -n patrol rollout restart deployment/status-page'
 

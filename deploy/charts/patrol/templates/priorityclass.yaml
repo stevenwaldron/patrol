@@ -1,0 +1,17 @@
+{{- if .Values.priority.enabled }}
+{{- $c := dict "root" . "component" "priority" }}
+# Patrol's own pods (scheduler, status page) are placed before lower-priority
+# ones and may evict them when a node is full. Cluster-wide object (no namespace).
+# Below Kubernetes' own system classes (2 billion), so it never outranks
+# kube-proxy, the CNI or CoreDNS.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: patrol-critical
+  labels:
+    {{- include "patrol.labels" $c | nindent 4 }}
+value: {{ .Values.priority.value }}
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Patrol's scheduler and status page: placed first, may evict lower-priority pods"
+{{- end }}

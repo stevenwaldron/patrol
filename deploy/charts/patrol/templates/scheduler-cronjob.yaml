@@ -28,11 +28,14 @@ spec:
       template:
         metadata:
           labels:
-            {{- include "patrol.labels" $c | nindent 12 }}
+            {{- include "patrol.podLabels" $c | nindent 12 }}
           annotations:
             {{- include "patrol.sitesChecksum" . | nindent 12 }}
         spec:
           serviceAccountName: scheduler
+          {{- if .Values.priority.enabled }}
+          priorityClassName: patrol-critical
+          {{- end }}
           automountServiceAccountToken: false
           restartPolicy: Never
           securityContext:

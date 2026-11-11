@@ -21,7 +21,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "patrol.labels" $c | nindent 8 }}
+        {{- include "patrol.podLabels" $c | nindent 8 }}
     spec:
       serviceAccountName: worker
       automountServiceAccountToken: false

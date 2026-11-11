@@ -86,3 +86,64 @@ resource "aws_iam_role_policy" "github_ecr_push" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_ecr_push.json
 }
+
+# ---------------------------------------------------------------------------
+# CI image check (found in Phase 9 drill 9): a commit setting image.tag to a tag
+# that doesn't exist in ECR passed every CI check, then failed in the cluster.
+# This second, read-only role lets CI ask ECR "does this tag exist?" on pull
+# requests too, so the ruleset blocks such a change before it reaches main.
+#
+# Trusts this repo's pull requests and pushes to main (same exact, immutable
+# subject format as above). Pull requests from forks never get an OIDC token,
+# so outside contributors can't use it. Permission: list images in Patrol's 3
+# repositories. It can't pull, push or delete anything.
+# ---------------------------------------------------------------------------
+data "aws_iam_policy_document" "github_image_check_trust" {
+  statement {
+    sid     = "GitHubActionsPullRequestsAndMain"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values = [
+        "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:ref:refs/heads/main",
+        "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:pull_request",
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_image_check" {
+  name                 = "${var.name_prefix}-ci-image-check"
+  description          = "GitHub Actions (PRs and main of ${var.github_owner}/${var.github_repo}): check image tags exist in ECR (read-only)"
+  assume_role_policy   = data.aws_iam_policy_document.github_image_check_trust.json
+  max_session_duration = 3600
+}
+
+data "aws_iam_policy_document" "github_image_check" {
+  statement {
+    sid       = "ListPatrolImages"
+    effect    = "Allow"
+    actions   = ["ecr:DescribeImages"]
+    resources = [for r in aws_ecr_repository.service : r.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_image_check" {
+  name   = "ecr-describe-images"
+  role   = aws_iam_role.github_image_check.id
+  policy = data.aws_iam_policy_document.github_image_check.json
+}

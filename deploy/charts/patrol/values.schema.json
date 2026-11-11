@@ -11,7 +11,8 @@
     "statusPage",
     "ingress",
     "monitoring",
-    "drill"
+    "drill",
+    "priority"
   ],
   "properties": {
     "expectedNamespace": {
@@ -275,6 +276,24 @@
         },
         "schedulerSuspended": {
           "type": "boolean"
+        }
+      }
+    },
+    "priority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "value"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000
         }
       }
     }

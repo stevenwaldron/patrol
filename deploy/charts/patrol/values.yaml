@@ -74,9 +74,14 @@ worker:
 
 statusPage:
   replicas: 2
-  terminationGracePeriodSeconds: 30
+  # Must exceed preStopSleepSeconds (the pause) plus the app's own shutdown.
+  terminationGracePeriodSeconds: 45
   # Pause before shutdown so the load balancer stops sending requests first.
-  preStopSleepSeconds: 10
+  # 30 s, not 10: removing the pod from the load balancer is the AWS Load
+  # Balancer Controller's job, and if its leader is evicted at the same moment
+  # (a node drain), the standby takes ~20 s to take over. A 10 s pause let the
+  # pod stop while still registered: 2 failed requests in Phase 9 drill 2.
+  preStopSleepSeconds: 30
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 256Mi }
@@ -107,3 +112,12 @@ drill:
   siteUrlOverrides: {}
   # Stop the scheduler: no new orders, so check freshness decays.
   schedulerSuspended: false
+
+# Kubernetes PriorityClass for Patrol's own scheduler and status page. When a
+# node is short of room (a drain, a failed node), the scheduler evicts
+# lower-priority pods (dashboards, controllers that fail open) to place these,
+# instead of leaving them Pending. Found in Phase 9 drill 2: the scheduler sat
+# Pending and checking paused. Workers don't need it (their own Karpenter pool).
+priority:
+  enabled: true
+  value: 100000

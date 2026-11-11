@@ -170,7 +170,25 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: KEDA can't read the patrol queue; workers are held at the minimum.
-          description: '{{ $value | humanize }} failed queue reads in the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
+          # No count in the text: KEDA's error counter doesn't go up once per
+          # failed read and increase() extrapolates, so a number here read as
+          # "2.012 failed queue reads" while the log showed dozens (Phase 9 drill 8).
+          description: 'KEDA has been reporting errors reading the queue during the last 10 minutes. Check the KEDA operator logs and its Pod Identity role (patrol-keda).'
+
+      # Both status-page copies on one node: one node failure would take the
+      # whole page down. Kubernetes only spreads pods when it places them, so
+      # after a drain or node replacement they can stay together indefinitely
+      # (Phase 9 drill 2). Fix: kubectl -n patrol rollout restart deployment/status-page
+      # (docs/drills.md). Pending pods (no node yet) are ignored.
+      - alert: PatrolStatusPageNotSpread
+        expr: |
+          count(count by (node) (kube_pod_info{namespace="patrol", pod=~"status-page-.*", node!=""})) < 2
+          and on() count(kube_pod_info{namespace="patrol", pod=~"status-page-.*", node!=""}) >= 2
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: Both status page copies are running on the same node.
+          description: 'A single node failure would take the status page down. Rebalance: kubectl -n patrol rollout restart deployment/status-page'
 
       # Workers that can't be placed: Karpenter couldn't launch a node (no
       # Spot or On-Demand capacity for the allowed types, the 8 vCPU limit

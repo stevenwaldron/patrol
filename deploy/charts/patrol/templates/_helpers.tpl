@@ -9,11 +9,22 @@ app.kubernetes.io/instance: {{ .root.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
-{{- define "patrol.labels" -}}
+{{/*
+Labels for pod templates. No chart version here on purpose: any change to a
+pod template's labels is a new revision, so `helm.sh/chart` made every chart
+release (even a comment change) restart every Patrol pod (found during the
+Phase 9 drills). The image tag stays: a new image restarts pods anyway.
+*/}}
+{{- define "patrol.podLabels" -}}
 {{ include "patrol.selectorLabels" . }}
 app.kubernetes.io/part-of: patrol
 app.kubernetes.io/version: {{ .root.Values.image.tag | quote }}
 app.kubernetes.io/managed-by: {{ .root.Release.Service }}
+{{- end }}
+
+{{/* Labels for everything else (Deployments, Services, ConfigMaps…): adds the chart version. */}}
+{{- define "patrol.labels" -}}
+{{ include "patrol.podLabels" . }}
 helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version }}
 {{- end }}
 

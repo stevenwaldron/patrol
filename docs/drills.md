@@ -28,6 +28,22 @@ Plus Slack `#patrol-alerts`, and Grafana (port 3001): **Patrol: overview**.
 
 ---
 
+## After any maintenance: rebalance the status page
+Kubernetes only spreads pods when it places them, so after a drain or a node
+replacement both status-page copies can stay on one node (Phase 9 drill 2), and
+one more node failure would take the page down. **PatrolStatusPageNotSpread**
+alerts after 15 minutes like that. Fix (a rolling restart: one copy at a time,
+no downtime):
+```bash
+kubectl --context patrol -n patrol rollout restart deployment/status-page
+```
+*Why not automatic:* the Kubernetes descheduler would do this for us, but for a
+cluster rebuilt every session it's a ninth platform component to run; the alert
+makes the imbalance visible instead. In a long-lived cluster: add the descheduler
+and keep the alert as its safety net.
+
+---
+
 ## Session 1: losing machines
 **Run order: 1 → 4 → 2 → 3.** Drills 2 and 3 take away a platform node, which
 may also move Prometheus (no disk: its history restarts) and Grafana. Doing the
@@ -94,7 +110,9 @@ Spot drill first keeps its evidence intact.
 | **Undo** | `git revert HEAD && git push` → **RESOLVED** in Slack. |
 | **Signals** | Status page; Grafana "Site status"; Slack. Times: push → Argo CD synced → first failed check → Slack. |
 
-**Result:** _…_
+**Result (Nov 11), break half:** commit `b571b0a` "Drill 5: chess down" at 23:58:17. Status page: chess **Down**, URL `https://patrol-drill.invalid`, `ConnectError: [Errno -2] Name or service not known`; the timeline shows 3, later 8, red checks after a green history. **PatrolSiteDown (chess)** in Slack at **00:07**, ~9 minutes after the commit. Predicted 6–8 minutes: within a minute or so (Argo CD's poll interval plus the 3-minute `for`). The intentionally broken site still alerted nothing, as designed.
+
+**Undo result:** `git revert` pushed; chess back to **Operational** on its real CloudFront URL (latency ~60 ms); its timeline shows the run of red checks between green ones (24-hour uptime 84.52%). Whole round trip, break and fix, done only through Git. **RESOLVED** (green ✅ PatrolSiteDown (chess)) in Slack at **00:17**, ~4 minutes after the revert at 00:13:12. Detection: commit → alert ~9 min; fix → resolved ~4 min.
 
 ### Drill 6: someone "fixes" things by hand
 | | |
@@ -104,7 +122,7 @@ Spot drill first keeps its evidence intact.
 | **Undo** | Nothing: Argo CD does it. |
 | **Signals** | `kubectl --context patrol -n patrol get deploy status-page -w`; Argo CD UI (patrol app OutOfSync, then Synced). |
 
-**Result:** _…_
+**Result (Nov 11): as predicted.** `kubectl scale deployment status-page --replicas=1` at ~00:35. The Deployment went 2/2 → 2/1 → **1/1** at once (Kubernetes obeyed), then the desired count snapped back to **1/2** — Argo CD had already noticed the drift and re-applied Git's 2 — and a new pod started: **2/2** within about a minute (deployment age 44m → 45m during the whole episode). Faster than the ~3 minutes predicted: Argo CD reacts to changes in objects it manages, not only on its 2-minute Git poll. One copy kept serving throughout; no alerts.
 
 ### Drill 7: checking stops (scheduler paused via Git)
 | | |
@@ -114,7 +132,9 @@ Spot drill first keeps its evidence intact.
 | **Undo** | `git revert HEAD && git push` → RESOLVED. |
 | **Signals** | Grafana "Age of latest check" and the SLO dashboard; Slack. |
 
-**Result:** _…_
+**Result (Nov 11): as predicted, plus one bonus alert.** Commit `0051384` "Drill 7: scheduler paused" at 00:46:47; Argo CD applied it ~2 min later (CronJob `suspend: true`, last run 00:49). Check ages climbed ~1 minute per minute in 30-second steps (status-page cache + scrape interval): past the 3-minute SLO line ~00:53, past 5 minutes ~00:55. **At 01:00 Slack received PatrolChecksStale (critical) for all three sites**, "latest check is 10m 7s old" (predicted 01:00–01:01), **and PatrolCheckFreshnessFastBurn** ("stale share over 1h is 18.33%, SLO allows 1%"): the cluster had been up over an hour, so the full-window guard from Phase 5 allowed the burn alert, as the runbook said it might. Note: PatrolChecksStale fires for broken-test too — staleness means "not being checked", which is true for every site; decision A (no alert for broken-test) applies to PatrolSiteDown only. Ages reached ~23 min before the revert.
+
+**Undo result:** `git revert` pushed; ages peaked at **~30 min** and dropped to seconds at **~01:21** (the first scheduler run after Argo CD unpaused it). **RESOLVED for PatrolChecksStale × 3 at 01:25** ("30m 7s old" = the last value while firing). The fast-burn alert cleared more slowly by design (1-hour window): its RESOLVED arrived ~01:36, reading "46.67%", its last value while firing.
 
 ### Drill 8: the autoscaler loses its AWS access
 | | |
@@ -124,7 +144,9 @@ Spot drill first keeps its evidence intact.
 | **Undo** | Through Terraform, which also shows drift detection: `cd infra/permanent && AWS_PROFILE=patrol terraform plan` (expect **1 to add**: the missing attachment) then `apply`. |
 | **Signals** | `kubectl --context patrol -n patrol get scaledobject` (FALLBACK True); KEDA operator logs; Argo CD; Slack. |
 
-**Result:** _…_
+**Result (Nov 11), break half: as predicted.** `aws iam detach-role-policy … patrol-keda` at ~01:34:40. KEDA's first failed read at **06:35:09 UTC (01:35:09)**, ~30 s later: `GetQueueAttributes … StatusCode: 403 … AccessDenied: User: …assumed-role/patrol-keda/eks-patrol-keda-opera-… is not authorized to perform: sqs:getqueueattributes on resource: …:patrol-checks because no identity-based policy allows the sqs:getqueueattributes action` — the exact role (via Pod Identity), action and queue, i.e. least privilege visible from the denied side. By **01:36:26**: ScaledObject **FALLBACK True** (workers held at 2), and Argo CD's patrol app **Synced / Degraded** (its built-in KEDA health check treats fallback as unhealthy). The status page and checking were unaffected. Slack: PatrolAutoscalerErrors _(time)_.
+
+**Undo result:** `terraform plan` in the permanent layer detected the drift on its own: **`Plan: 1 to add, 0 to change, 0 to destroy`** (the missing role-policy attachment); `terraform apply` restored it ~01:42. Recovery by 01:43: FALLBACK False, patrol app Synced / **Healthy**. **PatrolAutoscalerErrors** reached Slack at **01:40** (~5½ min after the first denied read; predicted 5–6). Its text said "2.012 failed queue reads in the last 10 minutes" while KEDA's log showed several errors every few seconds: a wording finding (see running log). RESOLVED at 01:45 ("1.053").
 
 ### Drill 9: a bad deploy
 | | |
@@ -134,7 +156,9 @@ Spot drill first keeps its evidence intact.
 | **Undo** | `git revert HEAD && git push`. |
 | **Signals** | Pods view; `kubectl --context patrol -n patrol get jobs`; Slack. |
 
-**Result:** _…_
+**Result (Nov 11): as predicted, plus a CI gap.** Commit `8743ee6` "Drill 9: bad image tag" (`0000000`) at 01:46:33. After Argo CD synced (~01:49): one new status-page pod and one new worker in **ImagePullBackOff**, the old pods **still Running** (74–121 min old); patrol app **Synced / Progressing**. Scheduler: the runs created before the sync completed; from the first run after it, every run was stuck in ImagePullBackOff and killed by its 50 s deadline → **PatrolSchedulerJobFailed at 01:52** (~6 min after the push). Probe across the whole drill: **565 requests / 648 s, 0 failed (100.00%)**. Reverted (`5afce79`) ~01:57.
+- *Why the two behaved differently:* Deployments roll out a new copy before removing an old one (`maxUnavailable: 0`), so a version that can't start never replaces a working one. A CronJob has no "old version": each run is created fresh from the current spec, so a bad image stops checking outright.
+- **CI gap:** CI was **green** on the bad-tag commit. It validates the chart and the policies (`0000000` is a valid commit-ID format), but never checks that the tag exists in ECR. Fix: a CI step that runs `aws ecr describe-images` for the chart's tag (CI already has an OIDC role for ECR) and fails if it's missing.
 
 ### Drill 10: a policy violation in a pull request (no cluster needed)
 | | |
@@ -144,4 +168,5 @@ Spot drill first keeps its evidence intact.
 | **Undo** | Close the PR, delete the branch (GitHub button), then locally: `git switch main && git branch -D drill/writable-fs`. |
 | **Signals** | The PR's checks; the failing step's message. |
 
-**Result:** _…_
+**Result (Nov 11): as predicted.** Branch `drill/writable-fs` (commit `f96c4ff`, one line in `_helpers.tpl`), PR opened ~02:03. **1 failing, 10 successful checks:** `ci / policies` failed after 16 s, every other required check green — the change is valid YAML, a valid chart, a buildable image; only the policy layer objects. **Merge pull request is greyed out** ("Required" on all 11 checks). The bad change never reached `main`, Argo CD or the cluster.
+- *Honest caveat:* as repository admin (the bypass list), Steven still sees **"Merge without waiting for requirements to be met (bypass rules)"**. The ruleset protects against bots, Dependabot and mistakes, not against the admin deliberately overriding it. Trade-off accepted for a one-person repo (direct pushes to `main` need it); a team would remove the bypass and require PRs.

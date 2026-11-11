@@ -55,10 +55,63 @@ jobs:
 
   chart:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write   # only for the read-only image check below
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The image the chart deploys must exist in ECR (Phase 9 drill 9: a tag
+      # that didn't exist passed CI and only failed in the cluster). Checked on
+      # main, and on a pull request only if it changes image.tag (so Dependabot's
+      # and other PRs never need AWS). Role: read-only, ecr:DescribeImages on
+      # Patrol's 3 repositories (infra/permanent/github-oidc.tf).
+      - name: Does this change the image tag?
+        id: tag
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          tag=$(awk '/^  tag:/ {gsub(/"/, "", $2); print $2; exit}' deploy/charts/patrol/values.yaml)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT" == "pull_request" ]]; then
+            git fetch --quiet --depth=1 origin "$BASE_REF"
+            base=$(git show "origin/${BASE_REF}:deploy/charts/patrol/values.yaml" \
+              | awk '/^  tag:/ {gsub(/"/, "", $2); print $2; exit}')
+            if [[ "$tag" == "$base" ]]; then
+              echo "image.tag unchanged ($tag): nothing to check"
+              echo "check=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "image.tag changes: $base -> $tag"
+          fi
+          echo "check=true" >> "$GITHUB_OUTPUT"
+      - name: AWS credentials (read-only image check, via OIDC)
+        if: steps.tag.outputs.check == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::419701112481:role/patrol-ci-image-check
+          aws-region: us-east-1
+      - name: The image tag exists in all three ECR repositories
+        if: steps.tag.outputs.check == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          missing=0
+          for service in scheduler worker status-page; do
+            if aws ecr describe-images --repository-name "patrol/$service" \
+                 --image-ids imageTag="$TAG" --query 'imageDetails[0].imageTags' --output text >/dev/null 2>&1; then
+              echo "ok       patrol/$service:$TAG"
+            else
+              echo "MISSING  patrol/$service:$TAG" >&2
+              missing=1
+            fi
+          done
+          if (( missing )); then
+            echo "image.tag $TAG isn't in ECR: it would fail to start in the cluster. Use a tag the release workflow pushed." >&2
+            exit 1
+          fi
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
