@@ -213,6 +213,29 @@ jobs:
           expect slack alertname=TargetDown severity=warning namespace=kyverno
       - name: Every Secret and ConfigMap a monitoring pod needs exists
         run: python3 deploy/monitoring/check_references.py kps.yaml
+      - name: The alerting path has its priority (above default, below Patrol)
+        # Drill 2 re-run: without it, a drain can leave Prometheus Pending (no alerts).
+        run: |
+          python3 - <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open("kps.yaml")) if d]
+          pcs = {d["metadata"]["name"]: d["value"] for d in docs if d["kind"] == "PriorityClass"}
+          patrol = yaml.safe_load(open("deploy/charts/patrol/values.yaml"))["priority"]["value"]
+          bad = []
+          if "platform-monitoring" not in pcs:
+              bad.append("PriorityClass platform-monitoring is not rendered")
+          elif not 0 < pcs["platform-monitoring"] < patrol:
+              bad.append(f"platform-monitoring = {pcs['platform-monitoring']}, must be between 0 and patrol-critical ({patrol})")
+          for kind in ("Prometheus", "Alertmanager"):
+              for d in (d for d in docs if d["kind"] == kind):
+                  got = d["spec"].get("priorityClassName")
+                  print(f"{kind}/{d['metadata']['name']}: priorityClassName={got}")
+                  if got != "platform-monitoring":
+                      bad.append(f"{kind}/{d['metadata']['name']} has priorityClassName={got!r}")
+          if bad:
+              print("\n".join(bad), file=sys.stderr); sys.exit(1)
+          print(f"ok: platform-monitoring = {pcs['platform-monitoring']} (patrol-critical = {patrol})")
+          PY
 
   policies:
     # Kyverno policies are tested like code: each rule against pods built to

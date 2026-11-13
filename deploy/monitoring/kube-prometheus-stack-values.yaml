@@ -50,11 +50,16 @@ prometheus:
     resources:
       requests: { cpu: 150m, memory: 400Mi }
       limits: { memory: 1Gi }
+    # Drill 2 re-run (Nov 11): a drain left Prometheus Pending for ~3 minutes
+    # (no alerting) because the surviving node had no room. With this class it
+    # pre-empts a default-priority pod instead. Below patrol-critical (100000).
+    priorityClassName: platform-monitoring
 
 alertmanager:
   alertmanagerSpec:
     # Mounted at /etc/alertmanager/secrets/alertmanager-slack/ (created by ESO).
     secrets: [alertmanager-slack]
+    priorityClassName: platform-monitoring   # same reason as Prometheus: the alerting path
     resources:
       requests: { cpu: 10m, memory: 48Mi }
       limits: { memory: 128Mi }
@@ -124,3 +129,19 @@ prometheus-node-exporter:
   resources:
     requests: { cpu: 10m, memory: 24Mi }
     limits: { memory: 64Mi }
+
+# ---- Priority for the alerting path -----------------------------------------
+# Patrol's own pods are patrol-critical (100000, in Patrol's chart). Everything
+# without a class is 0. Prometheus and Alertmanager sit between them, so on two
+# platform nodes with no spare room a drain makes a less important platform
+# pod wait instead of the alerting system. (Trade-off: we can't choose which
+# priority-0 pod waits; the alternative was a third node, rejected on cost.)
+extraManifests:
+  - apiVersion: scheduling.k8s.io/v1
+    kind: PriorityClass
+    metadata:
+      name: platform-monitoring
+    value: 50000
+    globalDefault: false
+    preemptionPolicy: PreemptLowerPriority
+    description: Prometheus and Alertmanager (Patrol's alerting path); below patrol-critical.

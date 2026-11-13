@@ -818,6 +818,17 @@ Chart **0.7.0**. All checks offline: helm lint; kubeconform 20/20 (both modes); 
 - *Process note:* I told Steven to rebalance as soon as the alert was Pending, so the not-spread alert never reached Slack. Next time: wait for Firing before acting on a drill step.
 - *Write-up:* Phase 10 PDF built (8 pages, 9 figures) with a new reusable `docstyle.py`, since there was no existing one to match.
 
+**Decision: protect the alerting path during drains (Nov 13, built offline, live proof pending).**
+- *Chosen:* PriorityClass `platform-monitoring` (50000) for Prometheus and Alertmanager, defined in the kube-prometheus-stack values (`extraManifests`) next to the pods that use it. Order is now: Patrol (`patrol-critical`, 100000) > alerting (50000) > everything else (0).
+- *Rejected:* a third platform node (real N+1 headroom, ~+$0.04/hour while up, to cover a 2–3 minute gap during planned work).
+- *Trade-off:* in a squeeze, some priority-0 platform pod waits instead, and we can't choose which one. If it's Argo CD's controller, self-heal pauses for a few minutes during maintenance.
+- *Guard:* a CI step in the monitoring job fails if the class isn't rendered, isn't between 0 and `patrol-critical`, or Prometheus/Alertmanager lose it. Mutation-checked: removing the class and setting it to 200000 both fail.
+
+**Decision: a drain-evicted scheduler run is not a failure (Nov 13, built offline, live proof pending).**
+- *Chosen:* `podFailurePolicy` on the scheduler Job: `DisruptionTarget` → `Ignore`, so the eviction doesn't count against `backoffLimit: 0` and a replacement pod starts. Real crashes still fail the Job and alert. Chart 0.8.0.
+- *Known edge:* the 50 s `activeDeadlineSeconds` still applies. If the replacement can't finish in time, the run fails on its deadline and the alert fires; that's correct, because checks really were late. A retried run may post some orders twice (one extra check, harmless).
+- *Rejected:* filtering evictions out of the PatrolSchedulerJobFailed alert (hides the run instead of retrying it).
+
 ## Reminders (open items)
 
 - [ ] **zlib pin cleanup:** once `python:3.13-slim` ships `zlib1g …-1+deb13u1`, bump the base digest and delete the temporary zlib step in `app/Dockerfile`.
@@ -828,8 +839,8 @@ Chart **0.7.0**. All checks offline: helm lint; kubeconform 20/20 (both modes); 
 - [x] **Drill 2 fixes:** status-page preStop pause longer than the load balancer controller's leader handover (~20 s; e.g. 30 s, grace period raised to match); PriorityClass for Patrol's scheduler/status page (or a third platform node); rebalance after maintenance (e.g. topology spread that is enforced, or a descheduler). Re-run drill 2 after.
 - [x] **PatrolAutoscalerErrors wording:** drop the misleading count ("2.012 failed queue reads") from the description.
 - [x] **CI: image tag must exist in ECR** (drill 9): fail the chart job if `aws ecr describe-images` can't find the chart's `image.tag` in all three repositories.
-- [ ] **Prometheus during a drain** (drill 2 re-run): a PriorityClass for Prometheus between `patrol-critical` and the default, so less critical platform pods are the ones left Pending; or a third platform node.
-- [ ] **Scheduler eviction ≠ failure** (drill 2 re-run): add a Job `podFailurePolicy` (`DisruptionTarget` → `Ignore`) so a drain-evicted run is retried instead of alerting.
+- [ ] **Prometheus during a drain** (drill 2 re-run) *(built Nov 13: prove live by draining the Prometheus node)*: a PriorityClass for Prometheus between `patrol-critical` and the default, so less critical platform pods are the ones left Pending; or a third platform node.
+- [ ] **Scheduler eviction ≠ failure** (drill 2 re-run) *(built Nov 13: prove live in the same drain)*: add a Job `podFailurePolicy` (`DisruptionTarget` → `Ignore`) so a drain-evicted run is retried instead of alerting.
 - [ ] **Nightly re-scan** of the deployed images (a scan result is only as current as Trivy's database).
 - [ ] **Backstory for `1cd545d`** (Nov 4 Terraform fix): ask Steven what problem it solved, for the write-up.
 - [ ] **Repeatable builds:** consider a hashed lock file for transitive Python dependencies (botocore floated from 1.43.115 to 1.43.123 under the same requirements).

@@ -93,6 +93,14 @@ Spot drill first keeps its evidence intact.
 - Not-spread alert: went **Pending** correctly with both copies on `ip-10-20-43-101`. The rebalance was done before its 15 min ran out, so it never reached Slack (the Firing path is covered by the unit test). After `rollout restart` the copies were on different nodes and the rule was back to **inactive**.
 - Teardown: 85 destroyed, nothing left over, 15m14s.
 
+**Drill 2c (planned): drain the node running Prometheus**, after chart 0.8.0 and the `platform-monitoring` priority class.
+| | |
+|---|---|
+| **Break** | Find Prometheus's node: `kubectl --context patrol -n monitoring get pod prometheus-kps-kube-prometheus-stack-prometheus-0 -o wide`, then drain that node as above. |
+| **Prediction** | Prometheus is rescheduled on the other node within seconds by pre-empting a priority-0 platform pod (that pod goes Pending until uncordon). Probe: 0 failed. If a scheduler run is evicted, a replacement pod starts (Job not failed) and **no PatrolSchedulerJobFailed** reaches Slack. PatrolStatusPageNotSpread reaches Slack ~15 min after the drain (wait for it before rebalancing). |
+| **Undo** | Uncordon; then the rebalance runbook. |
+| **Signals** | `kubectl --context patrol get pods -A --field-selector=status.phase=Pending`; `kubectl --context patrol get events -A --field-selector reason=Preempted`; `kubectl --context patrol -n patrol get jobs`; Slack. |
+
 ### Drill 3: a platform node dies suddenly
 | | |
 |---|---|

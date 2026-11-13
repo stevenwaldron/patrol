@@ -23,6 +23,16 @@ spec:
       # No retries: a failed run is simply replaced by the next minute's run
       # (and stale orders are discarded by the workers anyway).
       backoffLimit: 0
+      # ...except a run stopped by a disruption (drain, eviction, preemption):
+      # that isn't the scheduler's fault, so it doesn't count as a failure and a
+      # replacement pod starts at once. Real crashes still fail the Job and alert.
+      # Found in the drill 2 re-run (Nov 11): a drain-evicted run paged Slack.
+      # A retried run may post some orders twice: harmless (one extra check).
+      podFailurePolicy:
+        rules:
+          - action: Ignore
+            onPodConditions:
+              - type: DisruptionTarget
       activeDeadlineSeconds: {{ .Values.scheduler.activeDeadlineSeconds }}
       ttlSecondsAfterFinished: 600
       template:
