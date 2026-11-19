@@ -18,7 +18,7 @@
 #     docker image inspect --format '{{index .RepoDigests 0}}' public.ecr.aws/docker/library/python:3.13-slim
 # Written as one literal FROM (not an ARG) so Dependabot can find and bump the
 # digest through a reviewed PR; both stages below build on this one line.
-FROM public.ecr.aws/docker/library/python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962 AS python
+FROM public.ecr.aws/docker/library/python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS python
 
 # ---- Stage 1: install dependencies into a virtual environment ---------------
 # Only requirements.txt is copied first, so this slow layer is cached and
