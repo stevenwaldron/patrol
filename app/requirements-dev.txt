@@ -1,4 +1,4 @@
 -r requirements.txt
 # Test-only dependencies
 pytest==9.2.0
-moto[sqs,dynamodb]==5.2.5
+moto[sqs,dynamodb]==5.2.6
